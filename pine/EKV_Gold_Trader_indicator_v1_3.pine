@@ -118,7 +118,9 @@ f_num(float value, string pattern) =>
 
 float atr = ta.atr(atrLen)
 bool timeframeOk = timeframe.isminutes and timeframe.multiplier == 5
-bool symbolOk = syminfo.basecurrency == "XAU" and syminfo.currency == "USD"
+// Some CFD feeds do not expose XAU/USD through basecurrency/currency. The
+// broker-neutral ticker test keeps common XAUUSD suffixes valid (e.g. OANDA:XAUUSD).
+bool symbolOk = str.contains(syminfo.ticker, "XAUUSD")
 float chartSeconds = timeframe.in_seconds()
 float h1Seconds = timeframe.in_seconds(h1Tf)
 float h4Seconds = timeframe.in_seconds(h4Tf)
