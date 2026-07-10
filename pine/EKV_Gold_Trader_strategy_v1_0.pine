@@ -1,7 +1,7 @@
 //@version=6
 // @description NY SMC research strategy for TradingView Strategy Tester only.
 // It is a conservative model of confirmed-bar signals, not an MT5 fill simulator.
-strategy("EKV Gold Trader Strategy v1.0 — NY SMC Backtest", overlay = true, pyramiding = 0, initial_capital = 100000, currency = currency.USD, commission_type = strategy.commission.percent, commission_value = 0.01, slippage = 2, process_orders_on_close = false, calc_on_order_fills = false, max_labels_count = 100, max_lines_count = 100)
+strategy("EKV Gold Trader Strategy v1.0 — NY SMC Backtest", overlay = true, pyramiding = 0, initial_capital = 100000, currency = currency.USD, commission_type = strategy.commission.percent, commission_value = 0.01, slippage = 2, margin_long = 1, margin_short = 1, process_orders_on_close = false, calc_on_order_fills = false, max_labels_count = 100, max_lines_count = 100)
 
 const string G_TEST = "01 — Test environment"
 const string G_BIAS = "02 — HTF bias"
@@ -11,6 +11,7 @@ const string G_NEWS = "05 — Manual news blackout"
 
 bool enforceM5 = input.bool(true, "Allow entries only on M5", group = G_TEST)
 bool enforceXauUsd = input.bool(true, "Allow entries only on XAUUSD", group = G_TEST)
+bool showDiagnostics = input.bool(true, "Show backtest diagnostics", group = G_TEST)
 int testFrom = input.time(timestamp("01 Jan 2023 00:00 +0000"), "Test from", group = G_TEST)
 int testTo = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Test to", group = G_TEST)
 int maxTradesPerDay = input.int(2, "Maximum filled trades per NY day", minval = 1, maxval = 5, group = G_TEST)
@@ -131,6 +132,12 @@ var float plannedRisk = na
 var float plannedQty = na
 var bool beMoved = false
 var bool positionWasOpen = false
+var int rawSweepCount = 0
+var int qualifiedSweepCount = 0
+var int chochCount = 0
+var int fvgCount = 0
+var int riskRejectCount = 0
+var int orderCount = 0
 
 bool canStart = stage == 0 and strategy.position_size == 0 and platformOk and dateOk and newPlanWindowOpen and not newsBlackout and tradesToday < maxTradesPerDay
 float bullSweepDepth = not na(lastSwingLow) ? lastSwingLow - low : na
@@ -139,6 +146,10 @@ bool rawBullSweep = not na(lastSwingLow) and low < lastSwingLow and close > last
 bool rawBearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh and bearSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingHighBar and barstate.isconfirmed
 bool bullSweep = canStart and biasGateBull and rawBullSweep and not rawBearSweep
 bool bearSweep = canStart and biasGateBear and rawBearSweep and not rawBullSweep
+if rawBullSweep or rawBearSweep
+    rawSweepCount += 1
+if bullSweep or bearSweep
+    qualifiedSweepCount += 1
 if bullSweep
     stage := 1
     direction := 1
@@ -176,6 +187,7 @@ bool bearChoch = stage == 1 and direction == -1 and bar_index > sweepBar and clo
 if bullChoch or bearChoch
     stage := 2
     chochBar := bar_index
+    chochCount += 1
 
 bool fvgExpired = stage == 2 and bar_index - chochBar > maxChochToFvg
 if stage == 2 and (fvgExpired or not newPlanWindowOpen or newsBlackout)
@@ -189,6 +201,7 @@ if stage == 2 and (fvgExpired or not newPlanWindowOpen or newsBlackout)
 bool bullFvg = stage == 2 and direction == 1 and bar_index > chochBar and newPlanWindowOpen and low > high[2] and low - high[2] >= atr * minFvgAtr and barstate.isconfirmed
 bool bearFvg = stage == 2 and direction == -1 and bar_index > chochBar and newPlanWindowOpen and high < low[2] and low[2] - high >= atr * minFvgAtr and barstate.isconfirmed
 if bullFvg or bearFvg
+    fvgCount += 1
     float fvgLow = bullFvg ? high[2] : high
     float fvgHigh = bullFvg ? low : low[2]
     float proximal = direction == 1 ? fvgHigh : fvgLow
@@ -202,6 +215,7 @@ if bullFvg or bearFvg
     float lots = not na(rawLots) ? f_roundDown(rawLots, lotStep) : na
     bool riskOk = stopDistance >= atr * minStopAtr and stopDistance <= atr * maxStopAtr and not na(lots) and lots >= minLot and beOffset < stopDistance * breakEvenAtR
     if riskOk
+        orderCount += 1
         plannedEntry := entry
         plannedSL := stop
         plannedTP := entry + direction * stopDistance * rewardRisk
@@ -216,6 +230,7 @@ if bullFvg or bearFvg
             strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty, limit = plannedEntry)
         strategy.exit("NY-SMC-EXIT", from_entry = entryId, stop = plannedSL, limit = plannedTP)
     else
+        riskRejectCount += 1
         stage := 0
         direction := 0
         sweepBar := na
@@ -281,3 +296,22 @@ plotshape(bearSweep, "Bearish sweep", shape.triangledown, location.abovebar, col
 plotshape(bullChoch or bearChoch, "CHoCH", shape.circle, location.abovebar, color = color.yellow, size = size.tiny)
 bgcolor(inNySession ? color.new(color.blue, 94) : na, title = "NY Open")
 plotchar(balancedProfile, "Balanced experimental", "E", location.top, color = color.orange, size = size.tiny)
+
+var table diagnostics = table.new(position.bottom_right, 2, 7, bgcolor = color.new(color.black, 15), frame_color = color.gray, frame_width = 1)
+if barstate.islast
+    table.clear(diagnostics, 0, 0, 1, 6)
+    if showDiagnostics
+        table.cell(diagnostics, 0, 0, "NY SMC TEST", text_color = color.white, bgcolor = color.new(color.blue, 40))
+        table.cell(diagnostics, 1, 0, signalProfile, text_color = balancedProfile ? color.orange : color.lime, bgcolor = color.new(color.blue, 40))
+        table.cell(diagnostics, 0, 1, "Raw / qualified", text_color = color.white)
+        table.cell(diagnostics, 1, 1, str.tostring(rawSweepCount) + " / " + str.tostring(qualifiedSweepCount), text_color = color.aqua)
+        table.cell(diagnostics, 0, 2, "CHoCH / FVG", text_color = color.white)
+        table.cell(diagnostics, 1, 2, str.tostring(chochCount) + " / " + str.tostring(fvgCount), text_color = color.aqua)
+        table.cell(diagnostics, 0, 3, "Orders / rejects", text_color = color.white)
+        table.cell(diagnostics, 1, 3, str.tostring(orderCount) + " / " + str.tostring(riskRejectCount), text_color = orderCount > 0 ? color.lime : color.red)
+        table.cell(diagnostics, 0, 4, "Closed / open", text_color = color.white)
+        table.cell(diagnostics, 1, 4, str.tostring(strategy.closedtrades) + " / " + str.tostring(strategy.opentrades), text_color = color.yellow)
+        table.cell(diagnostics, 0, 5, "Stage / position", text_color = color.white)
+        table.cell(diagnostics, 1, 5, str.tostring(stage) + " / " + str.tostring(strategy.position_size), text_color = color.white)
+        table.cell(diagnostics, 0, 6, "Platform / date", text_color = color.white)
+        table.cell(diagnostics, 1, 6, (platformOk ? "OK" : "BLOCK") + " / " + (dateOk ? "OK" : "BLOCK"), text_color = platformOk and dateOk ? color.lime : color.red)

@@ -7,6 +7,9 @@ sweep, later CHoCH, later FVG, and a limit retracement.
 It is not an MT5 execution model. Its order fills, commission, slippage,
 contract semantics, and intrabar order are TradingView assumptions. Use it for
 walk-forward and out-of-sample comparison, not as evidence of live performance.
+The strategy declaration uses 1% long/short margin to model 1:100 leverage;
+without it, TradingView can reject risk-sized XAUUSD quantities as unaffordable
+and show an empty report even when structural setup markers are visible.
 
 Use standard OANDA:XAUUSD M5 candles. Start with Production-style defaults,
 review the Strategy Tester list of trades, and test multiple non-overlapping
