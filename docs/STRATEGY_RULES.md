@@ -33,3 +33,16 @@
 7. Jaké spread/komise/slippage a broker lot specifikace jsou autoritativní?
 
 Žádná implementace nesmí tvrdit garantovanou ziskovost.
+
+## Rozhodnutí indikátoru v1.3
+
+- Lifecycle je `sweep → pozdější CHoCH → pozdější FVG → pozdější entry touch`;
+  události jsou potvrzené na close M5.
+- Expirace N dovoluje událost do vzdálenosti N; reset nastává při `> N`.
+- Směr a profil se zmrazí při sweepu; pozdější live HTF bias setup neruší.
+- Poslední session svíčka může zasáhnout pending, jinak jej na close zruší.
+  Stage 1/2 reset nemá CANCEL; stage 3 má právě jeden CANCEL.
+- News blackout ruší rozpracovaný/pending setup, ale stage 4 přežívá session,
+  news i nový NY den. BE vyžaduje close M5 a nový stop platí od další svíčky.
+- Risk vychází z referenčního účtu; broker lot, spread, slippage a skutečný MT5
+  fill se ověřují ručně. Dual sweep se odmítá.

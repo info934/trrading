@@ -1,0 +1,712 @@
+//@version=6
+indicator(
+     "EKV Gold Trader Indicator v1.3 — NY Open CHoCH + FVG",
+     overlay = true,
+     max_boxes_count = 50,
+     max_labels_count = 100,
+     max_lines_count = 100)
+
+// Signal/alert indicator for TradingView. It does not use Strategy Tester,
+// broker-emulator orders or Bar Magnifier. All setup decisions are confirmed
+// on bar close. Entry/BE/exit events are indicative price-touch events only.
+
+const string G_GENERAL = "01 — General"
+const string G_BIAS    = "02 — H1/H4 Bias"
+const string G_SETUP   = "03 — Sweep / CHoCH / FVG"
+const string G_RISK    = "04 — Risk & MT5"
+const string G_SESSION = "05 — Session"
+const string G_NEWS    = "06 — Fundamental blackout"
+const string G_VIS     = "07 — Visuals"
+
+bool enforceM5      = input.bool(true, "Allow signals only on M5", group = G_GENERAL)
+bool enforceXauUsd  = input.bool(true, "Allow signals only on XAUUSD", group = G_GENERAL,
+     tooltip = "Uses XAU/USD base and quote currencies, so broker suffixes remain supported.")
+int maxTradesPerDay = input.int(2, "Maximum entry touches per NY day", minval = 1, maxval = 5, group = G_GENERAL)
+string signalProfile = input.string("Production", "Signal profile",
+     options = ["Production", "Balanced experimental", "Structure debug"], group = G_GENERAL,
+     tooltip = "Production requires H1 and H4 alignment. Balanced accepts H1 or H4. Structure debug ignores EMA bias and never sends trade alerts.")
+string displayMode = input.string("Clean", "Display mode", options = ["Clean", "Debug"], group = G_GENERAL,
+     tooltip = "Clean shows actionable lifecycle events. Debug also shows pivots, blocked sweeps, EMA and rejection counters.")
+
+string h1Tf      = input.timeframe("60", "H1 timeframe", group = G_BIAS)
+string h4Tf      = input.timeframe("240", "H4 timeframe", group = G_BIAS)
+int htfFastLen   = input.int(50, "Fast EMA", minval = 2, group = G_BIAS)
+int htfSlowLen   = input.int(200, "Slow EMA", minval = 10, group = G_BIAS)
+bool useEmaSlope = input.bool(true, "Require fast EMA slope", group = G_BIAS)
+
+float h1Close    = request.security(syminfo.tickerid, h1Tf, close[1], lookahead = barmerge.lookahead_on)
+float h1Fast     = request.security(syminfo.tickerid, h1Tf, ta.ema(close, htfFastLen)[1], lookahead = barmerge.lookahead_on)
+float h1FastPrev = request.security(syminfo.tickerid, h1Tf, ta.ema(close, htfFastLen)[2], lookahead = barmerge.lookahead_on)
+float h1Slow     = request.security(syminfo.tickerid, h1Tf, ta.ema(close, htfSlowLen)[1], lookahead = barmerge.lookahead_on)
+float h4Close    = request.security(syminfo.tickerid, h4Tf, close[1], lookahead = barmerge.lookahead_on)
+float h4Fast     = request.security(syminfo.tickerid, h4Tf, ta.ema(close, htfFastLen)[1], lookahead = barmerge.lookahead_on)
+float h4FastPrev = request.security(syminfo.tickerid, h4Tf, ta.ema(close, htfFastLen)[2], lookahead = barmerge.lookahead_on)
+float h4Slow     = request.security(syminfo.tickerid, h4Tf, ta.ema(close, htfSlowLen)[1], lookahead = barmerge.lookahead_on)
+
+bool h1Bull = h1Close > h1Slow and h1Fast > h1Slow and (not useEmaSlope or h1Fast > h1FastPrev)
+bool h1Bear = h1Close < h1Slow and h1Fast < h1Slow and (not useEmaSlope or h1Fast < h1FastPrev)
+bool h4Bull = h4Close > h4Slow and h4Fast > h4Slow and (not useEmaSlope or h4Fast > h4FastPrev)
+bool h4Bear = h4Close < h4Slow and h4Fast < h4Slow and (not useEmaSlope or h4Fast < h4FastPrev)
+bool biasBull = h1Bull and h4Bull
+bool biasBear = h1Bear and h4Bear
+bool productionProfile = signalProfile == "Production"
+bool balancedProfile = signalProfile == "Balanced experimental"
+bool structureProfile = signalProfile == "Structure debug"
+bool debugDisplay = displayMode == "Debug"
+bool tradeAlertsAllowed = not structureProfile
+bool biasGateBull = productionProfile ? biasBull : balancedProfile ? (h1Bull or h4Bull) and not (h1Bear or h4Bear) : true
+bool biasGateBear = productionProfile ? biasBear : balancedProfile ? (h1Bear or h4Bear) and not (h1Bull or h4Bull) : true
+string h1BiasText = h1Bull ? "BULL" : h1Bear ? "BEAR" : "NEUTRAL"
+string h4BiasText = h4Bull ? "BULL" : h4Bear ? "BEAR" : "NEUTRAL"
+string liveBiasText = h1BiasText + "/" + h4BiasText
+
+int swingLen            = input.int(3, "Confirmed pivot length", minval = 2, maxval = 15, group = G_SETUP)
+int maxBarsSweepToChoch = input.int(12, "Max bars: sweep → CHoCH", minval = 2, maxval = 50, group = G_SETUP)
+int maxBarsChochToFvg   = input.int(8, "Max bars: CHoCH → FVG", minval = 1, maxval = 30, group = G_SETUP)
+int pendingExpiryBars   = input.int(12, "FVG plan expiry (bars)", minval = 1, maxval = 50, group = G_SETUP)
+int atrLen              = input.int(14, "ATR length", minval = 2, group = G_SETUP)
+float maxSweepDepthAtr  = input.float(1.00, "Maximum sweep depth (ATR)", minval = 0.10, step = 0.05, group = G_SETUP)
+float displacementAtr  = input.float(0.60, "Minimum CHoCH candle body (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
+float minFvgAtr         = input.float(0.10, "Minimum FVG size (ATR)", minval = 0.0, step = 0.01, group = G_SETUP)
+string entryMode        = input.string("Midpoint", "FVG entry", options = ["Midpoint", "Proximal edge"], group = G_SETUP)
+float slBufferAtr       = input.float(0.10, "SL buffer behind sweep (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
+float minStopAtr        = input.float(0.40, "Minimum stop distance (ATR)", minval = 0.10, step = 0.05, group = G_SETUP)
+float maxStopAtr        = input.float(2.50, "Maximum stop distance (ATR)", minval = 0.50, step = 0.10, group = G_SETUP)
+
+float accountSize     = input.float(100000, "Reference MT5 account size (USD)", minval = 1000, step = 1000, group = G_RISK)
+float riskPercent     = input.float(0.50, "Risk per trade (%)", minval = 0.05, maxval = 2.0, step = 0.05, group = G_RISK)
+float rewardRisk      = input.float(3.0, "Take profit (R)", minval = 1.0, maxval = 10.0, step = 0.25, group = G_RISK)
+float breakEvenAtR    = input.float(1.50, "Move SL to BE after (R)", minval = 0.5, maxval = 5.0, step = 0.25, group = G_RISK)
+float beOffsetPrice   = input.float(0.10, "BE offset for costs (USD/oz)", minval = 0.0, step = 0.01, group = G_RISK)
+float mt5ContractSize = input.float(100.0, "MT5 contract size: oz per 1 lot", minval = 1.0, step = 1.0, group = G_RISK)
+float mt5MinLot       = input.float(0.01, "MT5 minimum lot", minval = 0.001, step = 0.001, group = G_RISK)
+float mt5LotStep      = input.float(0.01, "MT5 lot step", minval = 0.001, step = 0.001, group = G_RISK)
+float mt5MaxLot       = input.float(100.0, "MT5 maximum lot", minval = 0.01, step = 0.01, group = G_RISK)
+
+string nyTimezone = input.string("America/New_York", "Session timezone", group = G_SESSION)
+string nySession  = input.session("0930-1200", "NY Open trading window", group = G_SESSION)
+
+bool useNewsFilter = input.bool(true, "Enable manual news blackout", group = G_NEWS)
+int newsBeforeMin  = input.int(30, "Minutes blocked before event", minval = 0, maxval = 180, group = G_NEWS)
+int newsAfterMin   = input.int(30, "Minutes blocked after event", minval = 0, maxval = 180, group = G_NEWS)
+bool news1On = input.bool(false, "Use event 1", inline = "N1", group = G_NEWS)
+int news1    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 1", inline = "N1", group = G_NEWS)
+bool news2On = input.bool(false, "Use event 2", inline = "N2", group = G_NEWS)
+int news2    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 2", inline = "N2", group = G_NEWS)
+bool news3On = input.bool(false, "Use event 3", inline = "N3", group = G_NEWS)
+int news3    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 3", inline = "N3", group = G_NEWS)
+bool news4On = input.bool(false, "Use event 4", inline = "N4", group = G_NEWS)
+int news4    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 4", inline = "N4", group = G_NEWS)
+
+bool showSessionBg = input.bool(true, "Highlight NY window", group = G_VIS)
+bool showNewsBg    = input.bool(true, "Highlight news blackout", group = G_VIS)
+bool showFvgBox    = input.bool(true, "Show active FVG", group = G_VIS)
+bool showLevels    = input.bool(true, "Show Entry / SL / BE / TP", group = G_VIS)
+bool showDashboard = input.bool(true, "Show dashboard", group = G_VIS)
+
+f_roundDownToStep(float value, float step) =>
+    step > 0 ? math.floor(value / step + 1e-9) * step : value
+
+f_newsBlackout(bool enabled, int eventTime, int beforeMs, int afterMs) =>
+    enabled and time_close >= eventTime - beforeMs and time <= eventTime + afterMs
+
+f_price(float value) =>
+    na(value) ? "—" : str.tostring(value, format.mintick)
+
+f_num(float value, string pattern) =>
+    na(value) ? "—" : str.tostring(value, pattern)
+
+float atr = ta.atr(atrLen)
+bool timeframeOk = timeframe.isminutes and timeframe.multiplier == 5
+bool symbolOk = syminfo.basecurrency == "XAU" and syminfo.currency == "USD"
+float chartSeconds = timeframe.in_seconds()
+float h1Seconds = timeframe.in_seconds(h1Tf)
+float h4Seconds = timeframe.in_seconds(h4Tf)
+bool htfOrderOk = h1Seconds > chartSeconds and h4Seconds > h1Seconds
+bool emaLengthOrderOk = htfFastLen < htfSlowLen
+bool lotConfigOk = mt5MinLot <= mt5MaxLot and mt5LotStep > 0
+bool stopRangeConfigOk = minStopAtr <= maxStopAtr
+int sessionStartHour = int(str.tonumber(str.substring(nySession, 0, 2)))
+int sessionStartMinute = int(str.tonumber(str.substring(nySession, 2, 4)))
+int sessionEndHour = int(str.tonumber(str.substring(nySession, 5, 7)))
+int sessionEndMinute = int(str.tonumber(str.substring(nySession, 7, 9)))
+int sessionStartMinuteOfDay = sessionStartHour * 60 + sessionStartMinute
+int sessionEndMinuteOfDay = sessionEndHour * 60 + sessionEndMinute
+bool sessionConfigOk = sessionStartMinuteOfDay < sessionEndMinuteOfDay
+bool platformOk = (not enforceM5 or timeframeOk) and (not enforceXauUsd or symbolOk) and htfOrderOk and emaLengthOrderOk and lotConfigOk and stopRangeConfigOk and sessionConfigOk
+string platformReason = not timeframeOk and enforceM5 ? "USE_M5" : not symbolOk and enforceXauUsd ? "USE_XAUUSD" : not htfOrderOk ? "INVALID_HTF_ORDER" : not emaLengthOrderOk ? "FAST_EMA_MUST_BE_SHORTER" : not lotConfigOk ? "INVALID_LOT_CONFIG" : not stopRangeConfigOk ? "INVALID_STOP_RANGE" : not sessionConfigOk ? "INVALID_SESSION" : "OK"
+
+int nyDOW = dayofweek(time, nyTimezone)
+bool weekdayOk = nyDOW >= dayofweek.monday and nyDOW <= dayofweek.friday
+bool inNySession = weekdayOk and not na(time(timeframe.period, nySession, nyTimezone))
+int closeMinuteOfDay = hour(time_close, nyTimezone) * 60 + minute(time_close, nyTimezone)
+bool newPlanWindowOpen = inNySession and closeMinuteOfDay < sessionEndMinuteOfDay
+bool sessionClosingNow = inNySession and not newPlanWindowOpen
+int beforeMs = newsBeforeMin * 60 * 1000
+int afterMs  = newsAfterMin * 60 * 1000
+bool inNewsBlackout = useNewsFilter and (
+     f_newsBlackout(news1On, news1, beforeMs, afterMs) or
+     f_newsBlackout(news2On, news2, beforeMs, afterMs) or
+     f_newsBlackout(news3On, news3, beforeMs, afterMs) or
+     f_newsBlackout(news4On, news4, beforeMs, afterMs))
+
+int nyDayKey = year(time, nyTimezone) * 10000 + month(time, nyTimezone) * 100 + dayofmonth(time, nyTimezone)
+var int lastNyDayKey = na
+var int tradesToday = 0
+bool newNyDay = na(lastNyDayKey) or nyDayKey != lastNyDayKey
+if newNyDay
+    lastNyDayKey := nyDayKey
+    tradesToday := 0
+
+float pivotHigh = ta.pivothigh(high, swingLen, swingLen)
+float pivotLow  = ta.pivotlow(low, swingLen, swingLen)
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+    lastSwingHighBar := bar_index - swingLen
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+    lastSwingLowBar := bar_index - swingLen
+
+// 0 waiting, 1 sweep, 2 CHoCH, 3 pending plan, 4 virtual open trade.
+var int stage = 0
+var int direction = 0
+var int sweepBar = na
+var float sweepExtreme = na
+var float sweepReference = na
+var float chochLevel = na
+var int chochBar = na
+var float fvgLow = na
+var float fvgHigh = na
+var int fvgBar = na
+var string planId = ""
+var float plannedEntry = na
+var float plannedSL = na
+var float plannedTP = na
+var float plannedBE = na
+var float plannedLots = na
+var float plannedRiskUsd = na
+var int fillBar = na
+var float activeStop = na
+var bool beMoved = false
+var box activeFvgBox = na
+var string setupProfile = ""
+var string setupBiasSnapshot = ""
+var string lastEvent = "—"
+var string lastBlockReason = "—"
+
+var int rawSweepCount = 0
+var int qualifiedSweepCount = 0
+var int chochCount = 0
+var int planCount = 0
+var int cancelCount = 0
+var int invalidRiskCount = 0
+var int blockedPlatformCount = 0
+var int blockedSessionCount = 0
+var int blockedNewsCount = 0
+var int blockedBiasCount = 0
+var int blockedStateCount = 0
+var int blockedDailyCount = 0
+var int blockedDualCount = 0
+var int invalidSweepCount = 0
+
+bool bullSweepEvent = false
+bool bearSweepEvent = false
+bool chochEvent = false
+bool planCreated = false
+bool planCancelled = false
+bool entryTouched = false
+bool touchBarAmbiguous = false
+bool beEvent = false
+bool exitEvent = false
+string cancelReason = ""
+string exitReason = ""
+int eventDirection = direction
+string eventPlanId = planId
+float eventStop = activeStop
+string eventProfile = setupProfile
+
+bool canStartSetup = stage == 0 and platformOk and newPlanWindowOpen and not inNewsBlackout and tradesToday < maxTradesPerDay
+bool sweepExpired = stage == 1 and bar_index - sweepBar > maxBarsSweepToChoch
+bool fvgExpired = stage == 2 and bar_index - chochBar > maxBarsChochToFvg
+bool pendingExpired = stage == 3 and bar_index - fvgBar > pendingExpiryBars
+bool setupSessionInvalid = stage > 0 and stage < 4 and (not inNySession or (sessionClosingNow and stage != 3))
+bool setupNewsInvalid = stage > 0 and stage < 4 and inNewsBlackout
+bool setupLimitInvalid = stage == 3 and tradesToday >= maxTradesPerDay
+
+if barstate.isconfirmed and stage > 0 and stage < 4 and (sweepExpired or fvgExpired or pendingExpired or setupSessionInvalid or setupNewsInvalid or setupLimitInvalid or newNyDay)
+    cancelReason := sweepExpired ? "SWEEP_EXPIRED" : fvgExpired ? "FVG_EXPIRED" : pendingExpired ? "PENDING_EXPIRED" : setupSessionInvalid ? "SESSION_CLOSED" : setupNewsInvalid ? "NEWS_BLACKOUT" : setupLimitInvalid ? "DAILY_LIMIT" : "NEW_NY_DAY"
+    planCancelled := stage == 3
+    eventDirection := direction
+    eventPlanId := planId
+    if planCancelled
+        cancelCount += 1
+        lastEvent := "CANCEL " + cancelReason
+    else
+        lastEvent := "RESET " + cancelReason
+    stage := 0
+    direction := 0
+    sweepBar := na
+    sweepExtreme := na
+    sweepReference := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    planId := ""
+    fillBar := na
+    activeStop := na
+    beMoved := false
+    setupProfile := ""
+    setupBiasSnapshot := ""
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+float bullSweepDepth = not na(lastSwingLow) ? lastSwingLow - low : na
+float bearSweepDepth = not na(lastSwingHigh) ? high - lastSwingHigh : na
+bool rawBullSweep = not na(lastSwingLow) and not na(lastSwingHigh) and low < lastSwingLow and close > lastSwingLow and bullSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingLowBar and barstate.isconfirmed
+bool rawBearSweep = not na(lastSwingHigh) and not na(lastSwingLow) and high > lastSwingHigh and close < lastSwingHigh and bearSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingHighBar and barstate.isconfirmed
+bool dualRawSweep = rawBullSweep and rawBearSweep
+bool bullSweep = canStartSetup and biasGateBull and rawBullSweep and not dualRawSweep
+bool bearSweep = canStartSetup and biasGateBear and rawBearSweep and not dualRawSweep
+bool rawSweepEvent = rawBullSweep or rawBearSweep
+bool rawBiasOk = (rawBullSweep and biasGateBull) or (rawBearSweep and biasGateBear)
+
+if rawSweepEvent
+    rawSweepCount += 1
+    if not bullSweep and not bearSweep
+        if dualRawSweep
+            blockedDualCount += 1
+            lastBlockReason := "DUAL_SWEEP"
+        else if not platformOk
+            blockedPlatformCount += 1
+            lastBlockReason := platformReason
+        else if not inNySession
+            blockedSessionCount += 1
+            lastBlockReason := "OUTSIDE_SESSION"
+        else if not newPlanWindowOpen
+            blockedSessionCount += 1
+            lastBlockReason := "LAST_SESSION_BAR"
+        else if inNewsBlackout
+            blockedNewsCount += 1
+            lastBlockReason := "NEWS_BLACKOUT"
+        else if tradesToday >= maxTradesPerDay
+            blockedDailyCount += 1
+            lastBlockReason := "DAILY_LIMIT"
+        else if stage != 0
+            blockedStateCount += 1
+            lastBlockReason := "STATE_BUSY"
+        else if not rawBiasOk
+            blockedBiasCount += 1
+            lastBlockReason := "BIAS_FILTER"
+        else
+            blockedStateCount += 1
+            lastBlockReason := "UNCLASSIFIED"
+
+if bullSweep
+    stage := 1
+    direction := 1
+    sweepBar := bar_index
+    sweepExtreme := low
+    sweepReference := lastSwingLow
+    chochLevel := lastSwingHigh
+    setupProfile := signalProfile
+    setupBiasSnapshot := liveBiasText
+    bullSweepEvent := true
+else if bearSweep
+    stage := 1
+    direction := -1
+    sweepBar := bar_index
+    sweepExtreme := high
+    sweepReference := lastSwingHigh
+    chochLevel := lastSwingLow
+    setupProfile := signalProfile
+    setupBiasSnapshot := liveBiasText
+    bearSweepEvent := true
+
+if bullSweepEvent or bearSweepEvent
+    qualifiedSweepCount += 1
+    lastEvent := direction == 1 ? "SWEEP LONG" : "SWEEP SHORT"
+
+if stage == 1 and direction == 1
+    sweepExtreme := math.min(sweepExtreme, low)
+if stage == 1 and direction == -1
+    sweepExtreme := math.max(sweepExtreme, high)
+
+bool sweepDepthInvalid = stage == 1 and not na(sweepReference) and (direction == 1 ? sweepReference - sweepExtreme > atr * maxSweepDepthAtr : sweepExtreme - sweepReference > atr * maxSweepDepthAtr)
+bool sweepCloseInvalid = stage == 1 and not na(sweepReference) and (direction == 1 ? close < sweepReference : close > sweepReference)
+if barstate.isconfirmed and stage == 1 and (sweepDepthInvalid or sweepCloseInvalid)
+    lastBlockReason := sweepDepthInvalid ? "SWEEP_DEPTH_INVALID" : "SWEEP_RECLAIM_FAILED"
+    lastEvent := "RESET " + lastBlockReason
+    invalidSweepCount += 1
+    stage := 0
+    direction := 0
+    sweepBar := na
+    sweepExtreme := na
+    sweepReference := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    planId := ""
+    fillBar := na
+    activeStop := na
+    beMoved := false
+    setupProfile := ""
+    setupBiasSnapshot := ""
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+float candleBody = math.abs(close - open)
+bool displacementOk = displacementAtr <= 0 or candleBody >= atr * displacementAtr
+bool bullishChoch = stage == 1 and direction == 1 and bar_index > sweepBar and close > chochLevel and displacementOk and barstate.isconfirmed
+bool bearishChoch = stage == 1 and direction == -1 and bar_index > sweepBar and close < chochLevel and displacementOk and barstate.isconfirmed
+if bullishChoch or bearishChoch
+    stage := 2
+    chochBar := bar_index
+    chochEvent := true
+    chochCount += 1
+    lastEvent := direction == 1 ? "CHoCH LONG" : "CHoCH SHORT"
+
+bool fvgTimingOk = bar_index > chochBar
+bool bullishFvg = stage == 2 and direction == 1 and fvgTimingOk and newPlanWindowOpen and low > high[2] and (low - high[2]) >= atr * minFvgAtr and barstate.isconfirmed
+bool bearishFvg = stage == 2 and direction == -1 and fvgTimingOk and newPlanWindowOpen and high < low[2] and (low[2] - high) >= atr * minFvgAtr and barstate.isconfirmed
+
+if bullishFvg or bearishFvg
+    fvgLow := bullishFvg ? high[2] : high
+    fvgHigh := bullishFvg ? low : low[2]
+    fvgBar := bar_index
+    float proximalEntry = direction == 1 ? fvgHigh : fvgLow
+    plannedEntry := entryMode == "Midpoint" ? (fvgLow + fvgHigh) / 2.0 : proximalEntry
+    plannedSL := direction == 1 ? sweepExtreme - atr * slBufferAtr : sweepExtreme + atr * slBufferAtr
+    float stopDistance = direction == 1 ? plannedEntry - plannedSL : plannedSL - plannedEntry
+    float riskUsd = accountSize * riskPercent / 100.0
+    float rawLots = stopDistance > 0 ? riskUsd / (stopDistance * mt5ContractSize) : na
+    float cappedLots = not na(rawLots) ? math.min(rawLots, mt5MaxLot) : na
+    float finalLots = not na(cappedLots) ? f_roundDownToStep(cappedLots, mt5LotStep) : na
+    bool stopDirectionOk = stopDistance > 0
+    bool stopDistanceOk = stopDirectionOk and stopDistance >= atr * minStopAtr and stopDistance <= atr * maxStopAtr
+    bool lotOk = lotConfigOk and not na(finalLots) and finalLots >= mt5MinLot and finalLots <= mt5MaxLot
+    bool riskBudgetOk = lotOk and finalLots * stopDistance * mt5ContractSize <= riskUsd + 0.01
+    bool beOffsetOk = stopDirectionOk and beOffsetPrice < stopDistance * breakEvenAtR
+    bool planRiskOk = stopDistanceOk and beOffsetOk and (structureProfile or (lotOk and riskBudgetOk))
+    if planRiskOk
+        plannedLots := lotOk ? finalLots : na
+        plannedRiskUsd := lotOk ? plannedLots * stopDistance * mt5ContractSize : na
+        plannedTP := plannedEntry + direction * stopDistance * rewardRisk
+        plannedBE := plannedEntry + direction * stopDistance * breakEvenAtR
+        planId := str.replace_all(syminfo.tickerid, ":", "_") + "-" + timeframe.period + "-" + str.tostring(time) + (direction == 1 ? "-L" : "-S")
+        stage := 3
+        planCreated := true
+        planCount += 1
+        eventPlanId := planId
+        eventDirection := direction
+        lastEvent := (structureProfile ? "DEBUG PLAN " : balancedProfile ? "EXPERIMENTAL CREATE " : "CREATE ") + (direction == 1 ? "LONG" : "SHORT")
+        if showFvgBox
+            if not na(activeFvgBox)
+                box.delete(activeFvgBox)
+            activeFvgBox := box.new(bar_index - 2, fvgHigh, bar_index, fvgLow, xloc = xloc.bar_index, extend = extend.right, bgcolor = direction == 1 ? color.new(color.teal, 85) : color.new(color.orange, 85), border_color = direction == 1 ? color.teal : color.orange)
+    else
+        invalidRiskCount += 1
+        lastBlockReason := not stopDirectionOk ? "INVALID_STOP_DIRECTION" : not stopDistanceOk ? "STOP_DISTANCE" : not beOffsetOk ? "INVALID_BE_OFFSET" : not lotOk ? "INVALID_LOT" : "RISK_BUDGET_EXCEEDED"
+        lastEvent := "REJECT " + lastBlockReason
+        stage := 0
+        direction := 0
+        sweepBar := na
+        sweepExtreme := na
+        sweepReference := na
+        chochLevel := na
+        chochBar := na
+        fvgLow := na
+        fvgHigh := na
+        fvgBar := na
+        plannedEntry := na
+        plannedSL := na
+        plannedTP := na
+        plannedBE := na
+        plannedLots := na
+        plannedRiskUsd := na
+        planId := ""
+        fillBar := na
+        activeStop := na
+        beMoved := false
+        setupProfile := ""
+        setupBiasSnapshot := ""
+        if not na(activeFvgBox)
+            box.delete(activeFvgBox)
+            activeFvgBox := na
+
+// Conservative virtual fill: only on a later confirmed bar and only while all
+// filters are still valid. This is not confirmation of an actual MT5 fill.
+bool targetBeforeEntry = stage == 3 and bar_index > fvgBar and barstate.isconfirmed and inNySession and not inNewsBlackout and (direction == 1 ? high >= plannedTP and low > plannedEntry : low <= plannedTP and high < plannedEntry)
+if targetBeforeEntry
+    cancelReason := "TARGET_BEFORE_ENTRY"
+    planCancelled := true
+    eventDirection := direction
+    eventPlanId := planId
+    cancelCount += 1
+    lastEvent := "CANCEL TARGET_BEFORE_ENTRY"
+    stage := 0
+    direction := 0
+    sweepBar := na
+    sweepExtreme := na
+    sweepReference := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    planId := ""
+    fillBar := na
+    activeStop := na
+    beMoved := false
+    setupProfile := ""
+    setupBiasSnapshot := ""
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+bool pendingTouch = stage == 3 and bar_index > fvgBar and barstate.isconfirmed and inNySession and not inNewsBlackout and (direction == 1 ? low <= plannedEntry : high >= plannedEntry)
+if pendingTouch
+    eventDirection := direction
+    eventPlanId := planId
+    tradesToday += 1
+    entryTouched := true
+    touchBarAmbiguous := direction == 1 ? (low <= plannedSL or high >= plannedTP) : (high >= plannedSL or low <= plannedTP)
+    lastEvent := touchBarAmbiguous ? "ENTRY TOUCH — BAR AMBIGUOUS" : "ENTRY TOUCH"
+    if touchBarAmbiguous
+        stage := 0
+        direction := 0
+        fillBar := na
+        sweepBar := na
+        sweepExtreme := na
+        sweepReference := na
+        chochLevel := na
+        chochBar := na
+        fvgLow := na
+        fvgHigh := na
+        fvgBar := na
+        plannedEntry := na
+        plannedSL := na
+        plannedTP := na
+        plannedBE := na
+        plannedLots := na
+        plannedRiskUsd := na
+        activeStop := na
+        beMoved := false
+        planId := ""
+        setupProfile := ""
+        setupBiasSnapshot := ""
+    else
+        stage := 4
+        fillBar := bar_index
+        activeStop := plannedSL
+        beMoved := false
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+// On the last session bar, a valid touch wins. An untouched pending plan is
+// cancelled at that bar's close, so no manual order survives past 12:00 NY.
+if barstate.isconfirmed and stage == 3 and sessionClosingNow
+    cancelReason := "SESSION_CLOSED"
+    planCancelled := true
+    eventDirection := direction
+    eventPlanId := planId
+    cancelCount += 1
+    lastEvent := "CANCEL SESSION_CLOSED"
+    stage := 0
+    direction := 0
+    sweepBar := na
+    sweepExtreme := na
+    sweepReference := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    planId := ""
+    fillBar := na
+    activeStop := na
+    beMoved := false
+    setupProfile := ""
+    setupBiasSnapshot := ""
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+// Virtual management starts on the bar after the entry-touch bar to avoid
+// inventing an unknown intrabar sequence from one OHLC candle.
+if stage == 4 and bar_index > fillBar and barstate.isconfirmed
+    bool stopHit = direction == 1 ? low <= activeStop : high >= activeStop
+    bool tpHit = direction == 1 ? high >= plannedTP : low <= plannedTP
+    if stopHit or tpHit
+        exitReason := stopHit and tpHit ? "AMBIGUOUS_SL_AND_TP" : stopHit ? (beMoved ? "BE_STOP" : "STOP_LOSS") : "TAKE_PROFIT"
+        exitEvent := true
+        eventDirection := direction
+        eventPlanId := planId
+        lastEvent := "EXIT " + exitReason
+    else
+        bool beHit = not beMoved and (direction == 1 ? close >= plannedBE : close <= plannedBE)
+        if beHit
+            beMoved := true
+            activeStop := direction == 1 ? plannedEntry + beOffsetPrice : plannedEntry - beOffsetPrice
+            beEvent := true
+            eventDirection := direction
+            eventPlanId := planId
+            eventStop := activeStop
+            lastEvent := "MOVE BE"
+
+if exitEvent
+    stage := 0
+    direction := 0
+    fillBar := na
+    sweepBar := na
+    sweepExtreme := na
+    sweepReference := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    activeStop := na
+    beMoved := false
+    planId := ""
+    setupProfile := ""
+    setupBiasSnapshot := ""
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+string alertProfile = eventProfile == "Production" ? "PRODUCTION" : eventProfile == "Balanced experimental" ? "BALANCED_EXPERIMENTAL" : "STRUCTURE_DEBUG"
+string eventMessage = ""
+if tradeAlertsAllowed
+    if planCreated
+        eventMessage := "EKV|v1.3|CREATE|" + eventPlanId + "|PROFILE=" + alertProfile + "|ORDER=" + (eventDirection == 1 ? "BUY_LIMIT" : "SELL_LIMIT") + "|ENTRY=" + f_price(plannedEntry) + "|SL=" + f_price(plannedSL) + "|BE=" + f_price(plannedBE) + "|TP=" + f_price(plannedTP) + "|LOT=" + f_num(plannedLots, "#.###")
+    else if planCancelled
+        eventMessage := "EKV|v1.3|CANCEL|" + eventPlanId + "|PROFILE=" + alertProfile + "|REASON=" + cancelReason
+    else if entryTouched
+        eventMessage := "EKV|v1.3|ENTRY_TOUCHED|" + eventPlanId + "|PROFILE=" + alertProfile + "|STATUS=" + (touchBarAmbiguous ? "AMBIGUOUS_ENTRY_BAR|TERMINAL=TRUE" : "VERIFY_MT5_FILL_MANUALLY")
+    else if beEvent
+        eventMessage := "EKV|v1.3|MOVE_BE|" + eventPlanId + "|PROFILE=" + alertProfile + "|SL=" + f_price(eventStop)
+    else if exitEvent
+        eventMessage := "EKV|v1.3|VIRTUAL_EXIT|" + eventPlanId + "|PROFILE=" + alertProfile + "|REASON=" + exitReason
+if eventMessage != ""
+    alert(eventMessage, alert.freq_once_per_bar_close)
+
+bgcolor(debugDisplay and showSessionBg and inNySession ? color.new(color.blue, 93) : na, title = "NY Open")
+bgcolor(debugDisplay and showNewsBg and inNewsBlackout ? color.new(color.red, 85) : na, title = "News blackout")
+plotshape(debugDisplay and not na(pivotHigh), "Pivot High", shape.triangledown, location.abovebar, color = color.new(color.red, 30), offset = -swingLen, size = size.tiny)
+plotshape(debugDisplay and not na(pivotLow), "Pivot Low", shape.triangleup, location.belowbar, color = color.new(color.green, 30), offset = -swingLen, size = size.tiny)
+plotshape(debugDisplay and rawBullSweep and not bullSweep, "Blocked bullish sweep", shape.xcross, location.belowbar, color = color.new(color.gray, 20), text = "BLOCK", textcolor = color.gray, size = size.tiny)
+plotshape(debugDisplay and rawBearSweep and not bearSweep, "Blocked bearish sweep", shape.xcross, location.abovebar, color = color.new(color.gray, 20), text = "BLOCK", textcolor = color.gray, size = size.tiny)
+plotshape(debugDisplay and bullSweepEvent, "Bullish sweep", shape.labelup, location.belowbar, color = color.teal, text = "SWEEP", textcolor = color.white, size = size.tiny)
+plotshape(debugDisplay and bearSweepEvent, "Bearish sweep", shape.labeldown, location.abovebar, color = color.orange, text = "SWEEP", textcolor = color.white, size = size.tiny)
+plotshape(debugDisplay and chochEvent and direction == 1, "Bullish CHoCH", shape.labelup, location.belowbar, color = color.green, text = "CHoCH", textcolor = color.white, size = size.tiny)
+plotshape(debugDisplay and chochEvent and direction == -1, "Bearish CHoCH", shape.labeldown, location.abovebar, color = color.red, text = "CHoCH", textcolor = color.white, size = size.tiny)
+plotshape(planCreated and setupProfile == "Production" and eventDirection == 1, "Production long plan", shape.labelup, location.belowbar, color = color.green, text = "BUY LIMIT", textcolor = color.white, size = size.small)
+plotshape(planCreated and setupProfile == "Production" and eventDirection == -1, "Production short plan", shape.labeldown, location.abovebar, color = color.red, text = "SELL LIMIT", textcolor = color.white, size = size.small)
+plotshape(planCreated and setupProfile == "Balanced experimental" and eventDirection == 1, "Experimental long plan", shape.labelup, location.belowbar, color = color.new(color.green, 25), text = "BUY EXP", textcolor = color.white, size = size.small)
+plotshape(planCreated and setupProfile == "Balanced experimental" and eventDirection == -1, "Experimental short plan", shape.labeldown, location.abovebar, color = color.new(color.red, 25), text = "SELL EXP", textcolor = color.white, size = size.small)
+plotshape(planCreated and setupProfile == "Structure debug", "Structure debug plan", shape.labelup, location.belowbar, color = color.gray, text = "DEBUG PLAN", textcolor = color.white, size = size.tiny)
+plotshape(entryTouched and not touchBarAmbiguous, "Entry touched", shape.circle, location.belowbar, color = color.aqua, text = "ENTRY", textcolor = color.black, size = size.tiny)
+plotshape(entryTouched and touchBarAmbiguous, "Ambiguous entry bar", shape.diamond, location.belowbar, color = color.orange, text = "ENTRY ?", textcolor = color.black, size = size.tiny)
+plotshape(planCancelled, "Plan cancelled", shape.xcross, location.abovebar, color = color.gray, text = "CANCEL", textcolor = color.gray, size = size.tiny)
+plotshape(beEvent, "Break-even moved", shape.circle, location.belowbar, color = color.yellow, text = "BE", textcolor = color.black, size = size.tiny)
+plotshape(exitEvent, "Virtual exit", shape.flag, location.abovebar, color = color.purple, text = "EXIT", textcolor = color.white, size = size.tiny)
+
+float displayEntry = stage >= 3 ? plannedEntry : na
+float displaySL = stage == 4 ? activeStop : stage == 3 ? plannedSL : na
+float displayBE = stage >= 3 ? plannedBE : na
+float displayTP = stage >= 3 ? plannedTP : na
+plot(showLevels ? displayEntry : na, "Entry", color.white, 2, plot.style_linebr)
+plot(showLevels ? displaySL : na, "Stop Loss", color.red, 2, plot.style_linebr)
+plot(showLevels ? displayBE : na, "BE trigger", color.yellow, 1, plot.style_linebr)
+plot(showLevels ? displayTP : na, "Take Profit", color.lime, 2, plot.style_linebr)
+float diagnosticEma = ta.ema(close, 20)
+plot(debugDisplay ? diagnosticEma : na, "Diagnostic EMA 20 — indicator running", color.new(color.aqua, 20), 2)
+
+var table dashboard = table.new(position.bottom_right, 2, 15, bgcolor = color.new(color.black, 25), frame_color = color.new(color.gray, 50), frame_width = 1)
+string stageText = stage == 0 ? "WAIT SWEEP" : stage == 1 ? "WAIT CHoCH" : stage == 2 ? "WAIT FVG" : stage == 3 ? "PENDING" : beMoved ? "OPEN — BE" : "OPEN — SL"
+string directionText = direction == 1 ? "LONG" : direction == -1 ? "SHORT" : "—"
+string frozenBiasText = stage > 0 and setupBiasSnapshot != "" ? setupBiasSnapshot : "—"
+string profileText = productionProfile ? "PRODUCTION" : balancedProfile ? "BALANCED EXP" : "STRUCTURE DEBUG"
+string compactPlanId = planId == "" ? "—" : str.length(planId) > 14 ? str.substring(planId, str.length(planId) - 14, str.length(planId)) : planId
+color directionColor = direction == 1 ? color.lime : direction == -1 ? color.red : color.silver
+color profileColor = productionProfile ? color.lime : balancedProfile ? color.orange : color.silver
+var label statusBadge = na
+if barstate.islast
+    if not na(statusBadge)
+        label.delete(statusBadge)
+    statusBadge := showDashboard ? label.new(bar_index, high + atr * 0.75, "EKV v1.3\n" + profileText + " · " + stageText + "\n" + platformReason + " · NY " + (inNySession ? "OPEN" : "CLOSED"), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = platformOk ? color.new(color.blue, 15) : color.new(color.red, 10), textcolor = color.white, size = size.small) : na
+if barstate.islast
+    table.clear(dashboard, 0, 0, 1, 14)
+    if showDashboard
+        table.cell(dashboard, 0, 0, "EKV INDICATOR", text_color = color.white, bgcolor = color.new(color.blue, 45), text_size = size.tiny)
+        table.cell(dashboard, 1, 0, "v1.3", text_color = color.white, bgcolor = color.new(color.blue, 45), text_size = size.tiny)
+        table.cell(dashboard, 0, 1, "Chart", text_size = size.tiny)
+        table.cell(dashboard, 1, 1, syminfo.ticker + "/" + timeframe.period + " " + platformReason, text_color = platformOk ? color.lime : color.red, text_size = size.tiny)
+        table.cell(dashboard, 0, 2, "Profile", text_size = size.tiny)
+        table.cell(dashboard, 1, 2, profileText, text_color = profileColor, text_size = size.tiny)
+        table.cell(dashboard, 0, 3, "Bias live/frozen", text_size = size.tiny)
+        table.cell(dashboard, 1, 3, liveBiasText + "/" + frozenBiasText, text_color = directionColor, text_size = size.tiny)
+        table.cell(dashboard, 0, 4, "NY/News", text_size = size.tiny)
+        table.cell(dashboard, 1, 4, (inNySession ? "OPEN" : "CLOSED") + "/" + (inNewsBlackout ? "BLOCK" : "CLEAR"), text_color = inNewsBlackout ? color.red : inNySession ? color.lime : color.silver, text_size = size.tiny)
+        table.cell(dashboard, 0, 5, "State/ID", text_size = size.tiny)
+        table.cell(dashboard, 1, 5, stageText + "/" + compactPlanId, text_color = directionColor, text_size = size.tiny)
+        table.cell(dashboard, 0, 6, "Entry/SL", text_size = size.tiny)
+        table.cell(dashboard, 1, 6, f_price(displayEntry) + "/" + f_price(displaySL), text_color = color.white, text_size = size.tiny)
+        table.cell(dashboard, 0, 7, "BE/TP", text_size = size.tiny)
+        table.cell(dashboard, 1, 7, f_price(displayBE) + "/" + f_price(displayTP), text_color = color.yellow, text_size = size.tiny)
+        table.cell(dashboard, 0, 8, "Lot/Risk", text_size = size.tiny)
+        table.cell(dashboard, 1, 8, f_num(plannedLots, "#.###") + "/$" + f_num(plannedRiskUsd, "#.##"), text_color = color.aqua, text_size = size.tiny)
+        table.cell(dashboard, 0, 9, "Last event", text_size = size.tiny)
+        table.cell(dashboard, 1, 9, lastEvent, text_color = color.orange, text_size = size.tiny)
+        if debugDisplay
+            table.cell(dashboard, 0, 10, "Raw/Qualified", text_size = size.tiny)
+            table.cell(dashboard, 1, 10, str.tostring(rawSweepCount) + "/" + str.tostring(qualifiedSweepCount), text_color = color.aqua, text_size = size.tiny)
+            table.cell(dashboard, 0, 11, "CHoCH/Plan/Cancel", text_size = size.tiny)
+            table.cell(dashboard, 1, 11, str.tostring(chochCount) + "/" + str.tostring(planCount) + "/" + str.tostring(cancelCount), text_color = color.aqua, text_size = size.tiny)
+            table.cell(dashboard, 0, 12, "Block P/S/N", text_size = size.tiny)
+            table.cell(dashboard, 1, 12, str.tostring(blockedPlatformCount) + "/" + str.tostring(blockedSessionCount) + "/" + str.tostring(blockedNewsCount), text_color = color.gray, text_size = size.tiny)
+            table.cell(dashboard, 0, 13, "Block B/St/D/Dual", text_size = size.tiny)
+            table.cell(dashboard, 1, 13, str.tostring(blockedBiasCount) + "/" + str.tostring(blockedStateCount) + "/" + str.tostring(blockedDailyCount) + "/" + str.tostring(blockedDualCount), text_color = color.gray, text_size = size.tiny)
+            table.cell(dashboard, 0, 14, "Last/Inv S-R", text_size = size.tiny)
+            table.cell(dashboard, 1, 14, lastBlockReason + "/" + str.tostring(invalidSweepCount) + "-" + str.tostring(invalidRiskCount), text_color = color.gray, text_size = size.tiny)

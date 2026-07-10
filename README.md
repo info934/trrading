@@ -11,8 +11,8 @@ validace v Pythonu.
 ## Aktuální stav
 
 Repozitář je inicializovaný a chráněný proti nechtěnému ukládání velkých dat,
-logů, reportů a tajných údajů. Implementace strategie čeká na dodání původního
-souboru `EKV_Gold_Trader_v1_0.txt`, který je podle zadání nutné nejprve auditovat.
+logů, reportů a tajných údajů. Doporučená signalizační implementace je indikátor
+v1.3; v1.0 a v1.2 zůstávají jako auditovatelné historické verze.
 
 ## Struktura
 
@@ -46,7 +46,13 @@ powershell -ExecutionPolicy Bypass -File scripts/check_workspace_size.ps1
 - `pine/EKV_Gold_Trader_v1_0.txt` — původní auditovaný strategický zdroj.
 - `pine/EKV_Gold_Trader_indicator_v1_2.pine` — signalizační indikátor v1.2
   bez Strategy Testeru a Bar Magnifieru; obsahuje úrovně, dashboard a alerty.
+- `pine/EKV_Gold_Trader_indicator_v1_3.pine` — doporučený indikátor s profily
+  Production/Balanced experimental/Structure debug a alerty `EKV|v1.3`.
 
-Indikátor nevytváří skutečné objednávky a jeho price-touch události nejsou
-potvrzením fillu v MT5. Před ručním obchodem je nutné zkontrolovat specifikaci
-XAUUSD kontraktu u konkrétního brokera.
+Indikátor nevytváří skutečné objednávky, nepoužívá Strategy Tester ani Bar
+Magnifier a jeho price-touch události nejsou potvrzením fillu v MT5. Před ručním
+obchodem je nutné zkontrolovat specifikaci XAUUSD kontraktu u brokera. Po změně
+skriptu je nutné vytvořit alert v TradingView znovu.
+
+Návod v1.3 je v `docs/INDICATOR_V1_3.md`; ověřovací checklist je v
+`tests/PINE_INDICATOR_V1_3_CHECKLIST.md`.

@@ -16,3 +16,11 @@ Všechny významné změny projektu budou dokumentovány v tomto souboru.
 - Pine indikátor v1.1 bez Strategy Testeru a placeného Bar Magnifieru.
 - Indikátor v1.2 s výchozím profilem Balanced, volitelným Strict/Structure-only
   režimem a vždy viditelnou diagnostickou EMA.
+- Indikátor v1.3 s výchozím Production profilem (H1+H4), Balanced experimental
+  bez protisměrného konfliktu a Structure debug profilem bez trade alertů.
+- v1.3 vynucuje pozdější CHoCH/FVG/touch, potvrzený close pro BE, deterministické
+  session/news/expiry rušení, stabilní planId a alert prefix `EKV|v1.3`.
+- v1.3 přidává risk/lot ochrany, cap před round-down, dual-sweep rejection,
+  reset invalidního plánu a Clean/Debug dashboard.
+- Tuning v1.3 zpřesňuje zmrazený HTF label, blokuje vznik setupu v poslední
+  session svíčce, ruší target-before-entry a validuje rozsah stop parametrů.
