@@ -6,6 +6,10 @@ Všechny významné změny projektu budou dokumentovány v tomto souboru.
 
 ### Added
 
+- Strategy backtest now follows the supplied NY-open model: first confirmed
+  CHoCH, FVG midpoint inside the 50%-61.8% retracement zone, limit entry,
+  FVG-candle stop, 4R target, structural-close break-even, and configurable
+  dynamic/fixed lot scaling.
 - Základní struktura repozitáře.
 - Ochrana proti commitnutí dat, logů, reportů, cache a tajných údajů.
 - Lokální pre-commit limit 25 MiB na jednotlivý soubor.

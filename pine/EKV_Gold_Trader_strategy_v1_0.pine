@@ -23,25 +23,26 @@ string h4Tf = input.timeframe("240", "H4 timeframe", group = G_BIAS)
 int fastLen = input.int(50, "Fast EMA", minval = 2, group = G_BIAS)
 int slowLen = input.int(200, "Slow EMA", minval = 10, group = G_BIAS)
 bool useSlope = input.bool(true, "Require fast EMA slope", group = G_BIAS)
-string signalProfile = input.string("Balanced experimental", "Backtest profile", options = ["Production", "Balanced experimental"], group = G_BIAS, tooltip = "Production requires H1 and H4 alignment. Balanced allows one directional HTF bias only when the other HTF is not opposite.")
+string signalProfile = input.string("Session CHoCH", "Backtest profile", options = ["Session CHoCH", "Production", "Balanced experimental"], group = G_BIAS, tooltip = "Session CHoCH follows the first confirmed structure break after 09:30 NY without an EMA direction gate.")
 
 int swingLen = input.int(3, "Confirmed pivot length", minval = 2, maxval = 15, group = G_SETUP)
-int maxSweepToChoch = input.int(12, "Max bars: sweep → CHoCH", minval = 2, maxval = 50, group = G_SETUP)
 int maxChochToFvg = input.int(8, "Max bars: CHoCH → FVG", minval = 1, maxval = 30, group = G_SETUP)
 int pendingExpiry = input.int(20, "FVG limit expiry (bars)", minval = 1, maxval = 50, group = G_SETUP)
 int atrLen = input.int(14, "ATR length", minval = 2, group = G_SETUP)
-float maxSweepDepthAtr = input.float(1.0, "Maximum sweep depth (ATR)", minval = 0.1, step = 0.05, group = G_SETUP)
 float displacementAtr = input.float(0.3, "Minimum CHoCH body (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
 float minFvgAtr = input.float(0.05, "Minimum FVG size (ATR)", minval = 0.0, step = 0.01, group = G_SETUP)
-string entryMode = input.string("Proximal edge", "FVG limit entry", options = ["Midpoint", "Proximal edge"], group = G_SETUP)
-string executionMode = input.string("Market on FVG (experimental)", "Backtest execution", options = ["Limit retracement", "Market on FVG (experimental)"], group = G_SETUP, tooltip = "Market mode increases the research sample but is not equivalent to the production limit-retracement workflow.")
-float slBufferAtr = input.float(0.1, "SL buffer behind sweep (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
+float fibZoneStart = input.float(0.50, "Fib zone start", minval = 0.0, maxval = 1.0, step = 0.001, group = G_SETUP)
+float fibZoneEnd = input.float(0.618, "Fib golden level", minval = 0.0, maxval = 1.0, step = 0.001, group = G_SETUP)
+float slBufferAtr = input.float(0.1, "SL buffer behind FVG candle (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
 float minStopAtr = input.float(0.1, "Minimum stop distance (ATR)", minval = 0.1, step = 0.05, group = G_SETUP, tooltip = "Wide research default. Tighten this range only after reviewing the risk-reject counter.")
 float maxStopAtr = input.float(10.0, "Maximum stop distance (ATR)", minval = 0.5, step = 0.1, group = G_SETUP, tooltip = "Wide research default. Tighten this range only after reviewing the risk-reject counter.")
 
-float riskPercent = input.float(0.5, "Risk per trade (% equity)", minval = 0.05, maxval = 2.0, step = 0.05, group = G_RISK)
-float rewardRisk = input.float(3.0, "Take profit (R)", minval = 1.0, maxval = 10.0, step = 0.25, group = G_RISK)
-float breakEvenAtR = input.float(1.5, "Move SL to BE after close (R)", minval = 0.5, maxval = 5.0, step = 0.25, group = G_RISK)
+string sizingMode = input.string("Risk % (dynamic)", "Position sizing mode", options = ["Risk % (dynamic)", "Fixed lots"], group = G_RISK)
+float riskPercent = input.float(0.5, "Risk per trade (% equity)", minval = 0.05, maxval = 5.0, step = 0.05, group = G_RISK, tooltip = "Dynamic lots = equity × risk % / (SL distance × contract size).")
+float fixedLots = input.float(0.10, "Fixed lots", minval = 0.01, step = 0.01, group = G_RISK)
+float lotMultiplier = input.float(1.0, "Lot multiplier", minval = 0.1, maxval = 10.0, step = 0.1, group = G_RISK, tooltip = "Multiplies the dynamic or fixed base lot size.")
+float maxLots = input.float(10.0, "Maximum lots", minval = 0.01, maxval = 100.0, step = 0.01, group = G_RISK)
+float rewardRisk = input.float(4.0, "Take profit (R)", minval = 1.0, maxval = 10.0, step = 0.25, group = G_RISK)
 float beOffset = input.float(0.1, "BE cost offset (USD/oz)", minval = 0.0, step = 0.01, group = G_RISK)
 float contractSize = input.float(100.0, "Contract size: oz per lot", minval = 1.0, group = G_RISK)
 float minLot = input.float(0.01, "Minimum lot", minval = 0.001, step = 0.001, group = G_RISK)
@@ -77,14 +78,15 @@ bool biasBull = h1Bull and h4Bull
 bool biasBear = h1Bear and h4Bear
 bool productionProfile = signalProfile == "Production"
 bool balancedProfile = signalProfile == "Balanced experimental"
-bool biasGateBull = productionProfile ? biasBull : (h1Bull or h4Bull) and not (h1Bear or h4Bear)
-bool biasGateBear = productionProfile ? biasBear : (h1Bear or h4Bear) and not (h1Bull or h4Bull)
+bool sessionChochProfile = signalProfile == "Session CHoCH"
+bool biasGateBull = sessionChochProfile or (productionProfile ? biasBull : (h1Bull or h4Bull) and not (h1Bear or h4Bear))
+bool biasGateBear = sessionChochProfile or (productionProfile ? biasBear : (h1Bear or h4Bear) and not (h1Bull or h4Bull))
 
 float atr = ta.atr(atrLen)
 bool timeframeOk = timeframe.isminutes and timeframe.multiplier == 5
 bool symbolOk = str.contains(syminfo.ticker, "XAUUSD")
 bool htfOk = timeframe.in_seconds(h1Tf) > timeframe.in_seconds() and timeframe.in_seconds(h4Tf) > timeframe.in_seconds(h1Tf)
-bool configOk = fastLen < slowLen and minStopAtr <= maxStopAtr and minLot > 0 and lotStep > 0
+bool configOk = fastLen < slowLen and fibZoneStart < fibZoneEnd and minStopAtr <= maxStopAtr and minLot > 0 and lotStep > 0 and maxLots >= minLot
 bool platformOk = (not enforceM5 or timeframeOk) and (not enforceXauUsd or symbolOk) and htfOk and configOk
 int endHour = int(str.tonumber(str.substring(nySession, 5, 7)))
 int endMinute = int(str.tonumber(str.substring(nySession, 7, 9)))
@@ -117,183 +119,153 @@ if not na(pivotLow)
     lastSwingLow := pivotLow
     lastSwingLowBar := bar_index - swingLen
 
-var int stage = 0
+var int stage = 0  // 0 wait CHoCH, 1 wait aligned FVG, 2 pending, 3 live
 var int direction = 0
-var int sweepBar = na
 var int chochBar = na
 var int fvgBar = na
-var float sweepExtreme = na
-var float sweepReference = na
-var float chochLevel = na
+var float impulseOrigin = na
+var float impulseExtreme = na
+var float beConfirmLevel = na
 var float plannedEntry = na
 var float plannedSL = na
 var float plannedTP = na
-var float plannedRisk = na
+var float plannedLots = na
 var float plannedQty = na
 var bool beMoved = false
 var bool positionWasOpen = false
-var int rawSweepCount = 0
-var int qualifiedSweepCount = 0
-var int chochCount = 0
+var bool sessionChochFound = false
+var int rawChochCount = 0
+var int qualifiedChochCount = 0
 var int fvgCount = 0
+var int alignedFvgCount = 0
 var int riskRejectCount = 0
 var int orderCount = 0
 
-bool canStart = stage == 0 and strategy.position_size == 0 and platformOk and dateOk and newPlanWindowOpen and not newsBlackout and tradesToday < maxTradesPerDay
-float bullSweepDepth = not na(lastSwingLow) ? lastSwingLow - low : na
-float bearSweepDepth = not na(lastSwingHigh) ? high - lastSwingHigh : na
-bool rawBullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow and bullSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingLowBar and barstate.isconfirmed
-bool rawBearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh and bearSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingHighBar and barstate.isconfirmed
-bool bullSweep = canStart and biasGateBull and rawBullSweep and not rawBearSweep
-bool bearSweep = canStart and biasGateBear and rawBearSweep and not rawBullSweep
-if rawBullSweep or rawBearSweep
-    rawSweepCount += 1
-if bullSweep or bearSweep
-    qualifiedSweepCount += 1
-if bullSweep
-    stage := 1
-    direction := 1
-    sweepBar := bar_index
-    sweepExtreme := low
-    sweepReference := lastSwingLow
-    chochLevel := lastSwingHigh
-if bearSweep
-    stage := 1
-    direction := -1
-    sweepBar := bar_index
-    sweepExtreme := high
-    sweepReference := lastSwingHigh
-    chochLevel := lastSwingLow
-
-if stage == 1 and direction == 1
-    sweepExtreme := math.min(sweepExtreme, low)
-if stage == 1 and direction == -1
-    sweepExtreme := math.max(sweepExtreme, high)
-bool sweepExpired = stage == 1 and bar_index - sweepBar > maxSweepToChoch
-bool sweepDepthInvalid = stage == 1 and (direction == 1 ? sweepReference - sweepExtreme > atr * maxSweepDepthAtr : sweepExtreme - sweepReference > atr * maxSweepDepthAtr)
-bool sweepCloseInvalid = stage == 1 and (direction == 1 ? close < sweepReference : close > sweepReference)
-if stage == 1 and (sweepExpired or sweepDepthInvalid or sweepCloseInvalid or not inNySession or newsBlackout)
-    stage := 0
-    direction := 0
-    sweepBar := na
-    sweepExtreme := na
-    sweepReference := na
-    chochLevel := na
+bool sessionStart = inNySession and not inNySession[1]
+if sessionStart
+    sessionChochFound := false
+    if strategy.position_size == 0
+        strategy.cancel("NY-CHOCH-L")
+        strategy.cancel("NY-CHOCH-S")
+        stage := 0
+        direction := 0
+        chochBar := na
+        fvgBar := na
+        impulseOrigin := na
+        impulseExtreme := na
 
 float body = math.abs(close - open)
 bool displacementOk = displacementAtr <= 0 or body >= atr * displacementAtr
-bool bullChoch = stage == 1 and direction == 1 and bar_index > sweepBar and close > chochLevel and displacementOk and barstate.isconfirmed
-bool bearChoch = stage == 1 and direction == -1 and bar_index > sweepBar and close < chochLevel and displacementOk and barstate.isconfirmed
+bool canDetectChoch = stage == 0 and not sessionChochFound and strategy.position_size == 0 and platformOk and dateOk and newPlanWindowOpen and not newsBlackout and tradesToday < maxTradesPerDay
+bool rawBullChoch = canDetectChoch and not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh and bar_index > lastSwingHighBar and displacementOk and barstate.isconfirmed
+bool rawBearChoch = canDetectChoch and not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow and bar_index > lastSwingLowBar and displacementOk and barstate.isconfirmed
+bool bullChoch = rawBullChoch and not rawBearChoch and biasGateBull
+bool bearChoch = rawBearChoch and not rawBullChoch and biasGateBear
+if rawBullChoch or rawBearChoch
+    rawChochCount += 1
 if bullChoch or bearChoch
-    stage := 2
+    qualifiedChochCount += 1
+    sessionChochFound := true
+    stage := 1
+    direction := bullChoch ? 1 : -1
     chochBar := bar_index
-    chochCount += 1
+    impulseOrigin := bullChoch ? lastSwingLow : lastSwingHigh
+    impulseExtreme := bullChoch ? high : low
 
-bool fvgExpired = stage == 2 and bar_index - chochBar > maxChochToFvg
-if stage == 2 and (fvgExpired or not newPlanWindowOpen or newsBlackout)
-    stage := 0
-    direction := 0
-    sweepBar := na
-    chochBar := na
-    sweepExtreme := na
-    sweepReference := na
-    chochLevel := na
-bool bullFvg = stage == 2 and direction == 1 and bar_index > chochBar and newPlanWindowOpen and low > high[2] and low - high[2] >= atr * minFvgAtr and barstate.isconfirmed
-bool bearFvg = stage == 2 and direction == -1 and bar_index > chochBar and newPlanWindowOpen and high < low[2] and low[2] - high >= atr * minFvgAtr and barstate.isconfirmed
-if bullFvg or bearFvg
+if stage == 1 and direction == 1
+    impulseExtreme := math.max(impulseExtreme, high)
+if stage == 1 and direction == -1
+    impulseExtreme := math.min(impulseExtreme, low)
+
+float impulseRange = not na(impulseOrigin) and not na(impulseExtreme) ? math.abs(impulseExtreme - impulseOrigin) : na
+float fib50 = direction == 1 ? impulseExtreme - impulseRange * fibZoneStart : impulseExtreme + impulseRange * fibZoneStart
+float fib618 = direction == 1 ? impulseExtreme - impulseRange * fibZoneEnd : impulseExtreme + impulseRange * fibZoneEnd
+float fibLower = math.min(fib50, fib618)
+float fibUpper = math.max(fib50, fib618)
+bool bullFvgRaw = stage == 1 and direction == 1 and bar_index > chochBar and low > high[2] and low - high[2] >= atr * minFvgAtr and barstate.isconfirmed
+bool bearFvgRaw = stage == 1 and direction == -1 and bar_index > chochBar and high < low[2] and low[2] - high >= atr * minFvgAtr and barstate.isconfirmed
+float candidateFvgLow = bullFvgRaw ? high[2] : bearFvgRaw ? high : na
+float candidateFvgHigh = bullFvgRaw ? low : bearFvgRaw ? low[2] : na
+float candidateMid = not na(candidateFvgLow) ? (candidateFvgLow + candidateFvgHigh) / 2.0 : na
+bool fibAligned = not na(candidateMid) and impulseRange > 0 and candidateMid >= fibLower and candidateMid <= fibUpper
+bool fvgSignal = newPlanWindowOpen and not newsBlackout and (bullFvgRaw or bearFvgRaw) and fibAligned
+if bullFvgRaw or bearFvgRaw
     fvgCount += 1
-    float fvgLow = bullFvg ? high[2] : high
-    float fvgHigh = bullFvg ? low : low[2]
-    float proximal = direction == 1 ? fvgHigh : fvgLow
-    bool marketOnFvg = executionMode == "Market on FVG (experimental)"
-    float limitEntry = entryMode == "Midpoint" ? (fvgLow + fvgHigh) / 2.0 : proximal
-    float entry = marketOnFvg ? close : limitEntry
-    float stop = direction == 1 ? sweepExtreme - atr * slBufferAtr : sweepExtreme + atr * slBufferAtr
+if fvgSignal
+    alignedFvgCount += 1
+    float entry = candidateMid
+    float stop = direction == 1 ? math.min(low, low[1]) - atr * slBufferAtr : math.max(high, high[1]) + atr * slBufferAtr
     float stopDistance = direction == 1 ? entry - stop : stop - entry
     float riskUsd = strategy.equity * riskPercent / 100.0
-    float rawLots = stopDistance > 0 ? riskUsd / (stopDistance * contractSize) : na
-    float lots = not na(rawLots) ? f_roundDown(rawLots, lotStep) : na
-    bool riskOk = stopDistance >= atr * minStopAtr and stopDistance <= atr * maxStopAtr and not na(lots) and lots >= minLot and beOffset < stopDistance * breakEvenAtR
+    float riskLots = stopDistance > 0 ? riskUsd / (stopDistance * contractSize) : na
+    float baseLots = sizingMode == "Fixed lots" ? fixedLots : riskLots
+    float scaledLots = not na(baseLots) ? baseLots * lotMultiplier : na
+    float cappedLots = not na(scaledLots) ? math.min(scaledLots, maxLots) : na
+    float lots = not na(cappedLots) ? f_roundDown(cappedLots, lotStep) : na
+    bool riskOk = stopDistance >= atr * minStopAtr and stopDistance <= atr * maxStopAtr and not na(lots) and lots >= minLot
     if riskOk
         orderCount += 1
         plannedEntry := entry
         plannedSL := stop
         plannedTP := entry + direction * stopDistance * rewardRisk
-        plannedRisk := stopDistance
+        plannedLots := lots
         plannedQty := lots * contractSize
+        beConfirmLevel := impulseExtreme
         fvgBar := bar_index
-        stage := 3
-        string entryId = direction == 1 ? "NY-SMC-L" : "NY-SMC-S"
-        if marketOnFvg
-            strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty)
-        else
-            strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty, limit = plannedEntry)
-        strategy.exit("NY-SMC-EXIT", from_entry = entryId, stop = plannedSL, limit = plannedTP)
+        stage := 2
+        string entryId = direction == 1 ? "NY-CHOCH-L" : "NY-CHOCH-S"
+        strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty, limit = plannedEntry)
+        strategy.exit("NY-CHOCH-EXIT", from_entry = entryId, stop = plannedSL, limit = plannedTP)
     else
         riskRejectCount += 1
-        stage := 0
-        direction := 0
-        sweepBar := na
-        chochBar := na
-        sweepExtreme := na
-        sweepReference := na
-        chochLevel := na
 
-bool pendingExpired = stage == 3 and bar_index - fvgBar > pendingExpiry
-bool targetBeforeEntry = stage == 3 and bar_index > fvgBar and (direction == 1 ? high >= plannedTP and low > plannedEntry : low <= plannedTP and high < plannedEntry)
-if stage == 3 and (pendingExpired or not inNySession or newsBlackout or targetBeforeEntry or tradesToday >= maxTradesPerDay)
-    strategy.cancel("NY-SMC-L")
-    strategy.cancel("NY-SMC-S")
+bool fvgWindowExpired = stage == 1 and bar_index - chochBar > maxChochToFvg
+if stage == 1 and (fvgWindowExpired or not newPlanWindowOpen or newsBlackout)
     stage := 0
-    direction := 0
-    sweepBar := na
-    chochBar := na
+
+bool pendingExpired = stage == 2 and bar_index - fvgBar > pendingExpiry
+bool targetBeforeEntry = stage == 2 and bar_index > fvgBar and (direction == 1 ? high >= plannedTP and low > plannedEntry : low <= plannedTP and high < plannedEntry)
+if stage == 2 and (pendingExpired or not inNySession or newsBlackout or targetBeforeEntry or tradesToday >= maxTradesPerDay)
+    strategy.cancel("NY-CHOCH-L")
+    strategy.cancel("NY-CHOCH-S")
+    stage := inNySession and bar_index - chochBar <= maxChochToFvg ? 1 : 0
     fvgBar := na
-    sweepExtreme := na
-    sweepReference := na
-    chochLevel := na
     plannedEntry := na
     plannedSL := na
     plannedTP := na
-    plannedRisk := na
+    plannedLots := na
     plannedQty := na
     beMoved := false
 
-if stage == 3 and strategy.position_size != 0
-    stage := 4
+if stage == 2 and strategy.position_size != 0
+    stage := 3
     positionWasOpen := true
     tradesToday += 1
-if stage == 4 and strategy.position_size != 0
-    float beTrigger = strategy.position_avg_price + direction * plannedRisk * breakEvenAtR
-    bool beNow = not beMoved and (direction == 1 ? close >= beTrigger : close <= beTrigger) and barstate.isconfirmed
+if stage == 3 and strategy.position_size != 0
+    bool structureConfirmed = direction == 1 ? close > beConfirmLevel : close < beConfirmLevel
+    bool beNow = not beMoved and structureConfirmed and barstate.isconfirmed
     if beNow
         beMoved := true
         float beStop = direction == 1 ? strategy.position_avg_price + beOffset : strategy.position_avg_price - beOffset
-        string activeEntryId = direction == 1 ? "NY-SMC-L" : "NY-SMC-S"
-        strategy.exit("NY-SMC-EXIT", from_entry = activeEntryId, stop = beStop, limit = plannedTP)
-if stage == 4 and strategy.position_size == 0 and positionWasOpen
+        string activeEntryId = direction == 1 ? "NY-CHOCH-L" : "NY-CHOCH-S"
+        strategy.exit("NY-CHOCH-EXIT", from_entry = activeEntryId, stop = beStop, limit = plannedTP)
+if stage == 3 and strategy.position_size == 0 and positionWasOpen
     positionWasOpen := false
-    stage := 0
-    direction := 0
-    sweepBar := na
-    chochBar := na
+    stage := inNySession and tradesToday < maxTradesPerDay and bar_index - chochBar <= maxChochToFvg ? 1 : 0
     fvgBar := na
-    sweepExtreme := na
-    sweepReference := na
-    chochLevel := na
     plannedEntry := na
     plannedSL := na
     plannedTP := na
-    plannedRisk := na
+    plannedLots := na
     plannedQty := na
     beMoved := false
 
-plot(stage >= 3 ? plannedEntry : na, "Entry", color.white, 2, plot.style_linebr)
-plot(stage >= 3 ? plannedSL : na, "Stop", color.red, 2, plot.style_linebr)
-plot(stage >= 3 ? plannedTP : na, "Take profit", color.lime, 2, plot.style_linebr)
-plotshape(bullSweep, "Bullish sweep", shape.triangleup, location.belowbar, color = color.teal, size = size.tiny)
-plotshape(bearSweep, "Bearish sweep", shape.triangledown, location.abovebar, color = color.orange, size = size.tiny)
-plotshape(bullChoch or bearChoch, "CHoCH", shape.circle, location.abovebar, color = color.yellow, size = size.tiny)
+plot(stage >= 2 ? plannedEntry : na, "Entry", color.white, 2, plot.style_linebr)
+plot(stage >= 2 ? plannedSL : na, "Stop", color.red, 2, plot.style_linebr)
+plot(stage >= 2 ? plannedTP : na, "Take profit", color.lime, 2, plot.style_linebr)
+plotshape(bullChoch, "Bullish CHoCH", shape.triangleup, location.belowbar, color = color.teal, size = size.tiny)
+plotshape(bearChoch, "Bearish CHoCH", shape.triangledown, location.abovebar, color = color.orange, size = size.tiny)
+plotshape(fvgSignal, "Golden-zone FVG", shape.diamond, location.abovebar, color = color.yellow, size = size.tiny)
 bgcolor(inNySession ? color.new(color.blue, 94) : na, title = "NY Open")
 
 var table diagnostics = table.new(position.bottom_right, 2, 7, bgcolor = color.new(color.black, 15), frame_color = color.gray, frame_width = 1)
@@ -302,15 +274,15 @@ if barstate.islast
     if showDiagnostics
         table.cell(diagnostics, 0, 0, "NY SMC TEST", text_color = color.white, bgcolor = color.new(color.blue, 40))
         table.cell(diagnostics, 1, 0, signalProfile, text_color = balancedProfile ? color.orange : color.lime, bgcolor = color.new(color.blue, 40))
-        table.cell(diagnostics, 0, 1, "Raw / qualified", text_color = color.white)
-        table.cell(diagnostics, 1, 1, str.tostring(rawSweepCount) + " / " + str.tostring(qualifiedSweepCount), text_color = color.aqua)
-        table.cell(diagnostics, 0, 2, "CHoCH / FVG", text_color = color.white)
-        table.cell(diagnostics, 1, 2, str.tostring(chochCount) + " / " + str.tostring(fvgCount), text_color = color.aqua)
+        table.cell(diagnostics, 0, 1, "Raw / qualified CHoCH", text_color = color.white)
+        table.cell(diagnostics, 1, 1, str.tostring(rawChochCount) + " / " + str.tostring(qualifiedChochCount), text_color = color.aqua)
+        table.cell(diagnostics, 0, 2, "FVG / golden aligned", text_color = color.white)
+        table.cell(diagnostics, 1, 2, str.tostring(fvgCount) + " / " + str.tostring(alignedFvgCount), text_color = color.aqua)
         table.cell(diagnostics, 0, 3, "Orders / rejects", text_color = color.white)
         table.cell(diagnostics, 1, 3, str.tostring(orderCount) + " / " + str.tostring(riskRejectCount), text_color = orderCount > 0 ? color.lime : color.red)
         table.cell(diagnostics, 0, 4, "Closed / open", text_color = color.white)
         table.cell(diagnostics, 1, 4, str.tostring(strategy.closedtrades) + " / " + str.tostring(strategy.opentrades), text_color = color.yellow)
-        table.cell(diagnostics, 0, 5, "Stage / position", text_color = color.white)
-        table.cell(diagnostics, 1, 5, str.tostring(stage) + " / " + str.tostring(strategy.position_size), text_color = color.white)
+        table.cell(diagnostics, 0, 5, "Stage / planned lots", text_color = color.white)
+        table.cell(diagnostics, 1, 5, str.tostring(stage) + " / " + (na(plannedLots) ? "-" : str.tostring(plannedLots)), text_color = color.white)
         table.cell(diagnostics, 0, 6, "Platform / date", text_color = color.white)
         table.cell(diagnostics, 1, 6, (platformOk ? "OK" : "BLOCK") + " / " + (dateOk ? "OK" : "BLOCK"), text_color = platformOk and dateOk ? color.lime : color.red)
