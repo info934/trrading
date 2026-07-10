@@ -9,6 +9,12 @@ on the repeatable NY-open model from the supplied transcript:
 4. Place a limit order at the FVG midpoint and the stop beyond its producing candle.
 5. Target 4R by default and move to break-even only after a confirmed structural close.
 
+Structure is tracked with an independent bias state. A close through an unbroken
+confirmed swing is classified as BOS when it continues the current bias and as
+CHoCH only when it flips that bias. Each swing level can trigger once. This is
+an original implementation of the general SMC principle; it does not copy the
+CC BY-NC-SA LuxAlgo source.
+
 It is not an MT5 execution model. Its order fills, commission, slippage,
 contract semantics, and intrabar order are TradingView assumptions. Use it for
 walk-forward and out-of-sample comparison, not as evidence of live performance.

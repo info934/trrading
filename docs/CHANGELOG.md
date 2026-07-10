@@ -10,6 +10,9 @@ Všechny významné změny projektu budou dokumentovány v tomto souboru.
   CHoCH, FVG midpoint inside the 50%-61.8% retracement zone, limit entry,
   FVG-candle stop, 4R target, structural-close break-even, and configurable
   dynamic/fixed lot scaling.
+- Structure tracking now distinguishes continuation BOS from bias-flipping
+  CHoCH, consumes each confirmed swing once, and requires a directional
+  displacement candle for FVG qualification.
 - Základní struktura repozitáře.
 - Ochrana proti commitnutí dat, logů, reportů, cache a tajných údajů.
 - Lokální pre-commit limit 25 MiB na jednotlivý soubor.

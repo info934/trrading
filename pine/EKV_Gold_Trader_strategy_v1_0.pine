@@ -112,12 +112,30 @@ var float lastSwingHigh = na
 var float lastSwingLow = na
 var int lastSwingHighBar = na
 var int lastSwingLowBar = na
+var bool lastSwingHighCrossed = false
+var bool lastSwingLowCrossed = false
+var int structureBias = 0
 if not na(pivotHigh)
     lastSwingHigh := pivotHigh
     lastSwingHighBar := bar_index - swingLen
+    lastSwingHighCrossed := false
 if not na(pivotLow)
     lastSwingLow := pivotLow
     lastSwingLowBar := bar_index - swingLen
+    lastSwingLowCrossed := false
+
+bool bullStructureBreakRaw = not na(lastSwingHigh) and not lastSwingHighCrossed and close > lastSwingHigh and bar_index > lastSwingHighBar and barstate.isconfirmed
+bool bearStructureBreakRaw = not na(lastSwingLow) and not lastSwingLowCrossed and close < lastSwingLow and bar_index > lastSwingLowBar and barstate.isconfirmed
+bool bullStructureBreak = bullStructureBreakRaw and not bearStructureBreakRaw
+bool bearStructureBreak = bearStructureBreakRaw and not bullStructureBreakRaw
+bool bullChochEvent = bullStructureBreak and structureBias == -1
+bool bearChochEvent = bearStructureBreak and structureBias == 1
+if bullStructureBreak
+    lastSwingHighCrossed := true
+    structureBias := 1
+if bearStructureBreak
+    lastSwingLowCrossed := true
+    structureBias := -1
 
 var int stage = 0  // 0 wait CHoCH, 1 wait aligned FVG, 2 pending, 3 live
 var int direction = 0
@@ -157,8 +175,8 @@ if sessionStart
 float body = math.abs(close - open)
 bool displacementOk = displacementAtr <= 0 or body >= atr * displacementAtr
 bool canDetectChoch = stage == 0 and not sessionChochFound and strategy.position_size == 0 and platformOk and dateOk and newPlanWindowOpen and not newsBlackout and tradesToday < maxTradesPerDay
-bool rawBullChoch = canDetectChoch and not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh and bar_index > lastSwingHighBar and displacementOk and barstate.isconfirmed
-bool rawBearChoch = canDetectChoch and not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow and bar_index > lastSwingLowBar and displacementOk and barstate.isconfirmed
+bool rawBullChoch = canDetectChoch and bullChochEvent and displacementOk
+bool rawBearChoch = canDetectChoch and bearChochEvent and displacementOk
 bool bullChoch = rawBullChoch and not rawBearChoch and biasGateBull
 bool bearChoch = rawBearChoch and not rawBullChoch and biasGateBear
 if rawBullChoch or rawBearChoch
@@ -182,8 +200,10 @@ float fib50 = direction == 1 ? impulseExtreme - impulseRange * fibZoneStart : im
 float fib618 = direction == 1 ? impulseExtreme - impulseRange * fibZoneEnd : impulseExtreme + impulseRange * fibZoneEnd
 float fibLower = math.min(fib50, fib618)
 float fibUpper = math.max(fib50, fib618)
-bool bullFvgRaw = stage == 1 and direction == 1 and bar_index > chochBar and low > high[2] and low - high[2] >= atr * minFvgAtr and barstate.isconfirmed
-bool bearFvgRaw = stage == 1 and direction == -1 and bar_index > chochBar and high < low[2] and low[2] - high >= atr * minFvgAtr and barstate.isconfirmed
+bool bullFvgDisplacement = close[1] > open[1] and close[1] > high[2] and (displacementAtr <= 0 or math.abs(close[1] - open[1]) >= atr[1] * displacementAtr)
+bool bearFvgDisplacement = close[1] < open[1] and close[1] < low[2] and (displacementAtr <= 0 or math.abs(close[1] - open[1]) >= atr[1] * displacementAtr)
+bool bullFvgRaw = stage == 1 and direction == 1 and bar_index > chochBar and low > high[2] and low - high[2] >= atr * minFvgAtr and bullFvgDisplacement and barstate.isconfirmed
+bool bearFvgRaw = stage == 1 and direction == -1 and bar_index > chochBar and high < low[2] and low[2] - high >= atr * minFvgAtr and bearFvgDisplacement and barstate.isconfirmed
 float candidateFvgLow = bullFvgRaw ? high[2] : bearFvgRaw ? high : na
 float candidateFvgHigh = bullFvgRaw ? low : bearFvgRaw ? low[2] : na
 float candidateMid = not na(candidateFvgLow) ? (candidateFvgLow + candidateFvgHigh) / 2.0 : na
