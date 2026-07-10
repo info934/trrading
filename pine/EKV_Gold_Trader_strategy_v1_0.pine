@@ -11,7 +11,7 @@ const string G_NEWS = "05 — Manual news blackout"
 
 bool enforceM5 = input.bool(true, "Allow entries only on M5", group = G_TEST)
 bool enforceXauUsd = input.bool(true, "Allow entries only on XAUUSD", group = G_TEST)
-bool showDiagnostics = input.bool(true, "Show backtest diagnostics", group = G_TEST)
+bool showDiagnostics = input.bool(false, "Show backtest diagnostics", group = G_TEST, tooltip = "Enable only while debugging the setup funnel.")
 int testFrom = input.time(timestamp("01 Jan 2023 00:00 +0000"), "Test from", group = G_TEST)
 int testTo = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Test to", group = G_TEST)
 int maxTradesPerDay = input.int(2, "Maximum filled trades per NY day", minval = 1, maxval = 5, group = G_TEST)
@@ -295,7 +295,6 @@ plotshape(bullSweep, "Bullish sweep", shape.triangleup, location.belowbar, color
 plotshape(bearSweep, "Bearish sweep", shape.triangledown, location.abovebar, color = color.orange, size = size.tiny)
 plotshape(bullChoch or bearChoch, "CHoCH", shape.circle, location.abovebar, color = color.yellow, size = size.tiny)
 bgcolor(inNySession ? color.new(color.blue, 94) : na, title = "NY Open")
-plotchar(balancedProfile, "Balanced experimental", "E", location.top, color = color.orange, size = size.tiny)
 
 var table diagnostics = table.new(position.bottom_right, 2, 7, bgcolor = color.new(color.black, 15), frame_color = color.gray, frame_width = 1)
 if barstate.islast
