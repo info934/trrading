@@ -1,0 +1,105 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.ipynb_checkpoints/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Market data: never commit downloaded/generated datasets
+/python/data/**
+!/python/data/README.md
+!/python/data/.gitkeep
+*.parquet
+*.feather
+*.arrow
+*.h5
+*.hdf5
+*.pickle
+*.pkl
+*.joblib
+*.npy
+*.npz
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+*.hst
+*.hcc
+*.fxt
+*.tks
+*.bi5
+
+# Generated reports, optimization studies, and model artifacts
+/reports/**
+!/reports/README.md
+!/reports/.gitkeep
+/artifacts/
+/models/
+/mlruns/
+/wandb/
+/optuna/
+
+# Logs and temporary/runtime output
+*.log
+*.log.*
+/logs/
+/tmp/
+/temp/
+/cache/
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+~$*
+
+# Large archives and exports
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+
+# IDE and OS metadata
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# OneDrive / Office transient files
+*.sync-conflict-*
+~*

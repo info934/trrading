@@ -1,0 +1,586 @@
+//@version=6
+strategy(
+     "EKV Gold Trader v1.0 — NY Open CHoCH + FVG",
+     overlay = true,
+     initial_capital = 100000,
+     currency = currency.USD,
+     pyramiding = 0,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1,
+     calc_on_order_fills = true,
+     calc_on_every_tick = false,
+     process_orders_on_close = true,
+     use_bar_magnifier = true,
+     max_boxes_count = 50,
+     max_labels_count = 100,
+     max_lines_count = 100)
+
+// ============================================================================
+// EKV GOLD TRADER v1.0
+// XAUUSD, M5, NY Open, liquidity sweep -> CHoCH -> FVG retracement.
+// SL behind sweep, TP 3R, Break Even after 1.5R.
+// Manual high-impact news blackout and MT5 lot calculation.
+// ============================================================================
+
+// ----- Groups
+const string G_GENERAL = "01 — General"
+const string G_BIAS    = "02 — H1/H4 Bias"
+const string G_SETUP   = "03 — Sweep / CHoCH / FVG"
+const string G_RISK    = "04 — Risk & MT5"
+const string G_SESSION = "05 — Session"
+const string G_NEWS    = "06 — Fundamental blackout"
+const string G_VIS     = "07 — Visuals"
+
+// ----- General
+bool enforceM5      = input.bool(true, "Allow signals only on M5", group = G_GENERAL)
+bool enforceXauUsd  = input.bool(false, "Allow signals only on XAUUSD", group = G_GENERAL,
+     tooltip = "Leave OFF if your broker uses a symbol suffix, e.g. XAUUSD.a.")
+int maxTradesPerDay = input.int(2, "Maximum filled trades per NY day", minval = 1, maxval = 5, group = G_GENERAL)
+
+// ----- Higher-timeframe bias (confirmed bars only)
+string h1Tf      = input.timeframe("60", "H1 timeframe", group = G_BIAS)
+string h4Tf      = input.timeframe("240", "H4 timeframe", group = G_BIAS)
+int htfFastLen   = input.int(50, "Fast EMA", minval = 2, group = G_BIAS)
+int htfSlowLen   = input.int(200, "Slow EMA", minval = 10, group = G_BIAS)
+bool useEmaSlope = input.bool(true, "Require fast EMA slope", group = G_BIAS)
+
+// Last confirmed HTF values: [1] + lookahead_on avoids using an unfinished HTF candle.
+float h1Close    = request.security(syminfo.tickerid, h1Tf, close[1], lookahead = barmerge.lookahead_on)
+float h1Fast     = request.security(syminfo.tickerid, h1Tf, ta.ema(close, htfFastLen)[1], lookahead = barmerge.lookahead_on)
+float h1FastPrev = request.security(syminfo.tickerid, h1Tf, ta.ema(close, htfFastLen)[2], lookahead = barmerge.lookahead_on)
+float h1Slow     = request.security(syminfo.tickerid, h1Tf, ta.ema(close, htfSlowLen)[1], lookahead = barmerge.lookahead_on)
+
+float h4Close    = request.security(syminfo.tickerid, h4Tf, close[1], lookahead = barmerge.lookahead_on)
+float h4Fast     = request.security(syminfo.tickerid, h4Tf, ta.ema(close, htfFastLen)[1], lookahead = barmerge.lookahead_on)
+float h4FastPrev = request.security(syminfo.tickerid, h4Tf, ta.ema(close, htfFastLen)[2], lookahead = barmerge.lookahead_on)
+float h4Slow     = request.security(syminfo.tickerid, h4Tf, ta.ema(close, htfSlowLen)[1], lookahead = barmerge.lookahead_on)
+
+bool h1Bull = h1Close > h1Slow and h1Fast > h1Slow and (not useEmaSlope or h1Fast > h1FastPrev)
+bool h1Bear = h1Close < h1Slow and h1Fast < h1Slow and (not useEmaSlope or h1Fast < h1FastPrev)
+bool h4Bull = h4Close > h4Slow and h4Fast > h4Slow and (not useEmaSlope or h4Fast > h4FastPrev)
+bool h4Bear = h4Close < h4Slow and h4Fast < h4Slow and (not useEmaSlope or h4Fast < h4FastPrev)
+bool biasBull = h1Bull and h4Bull
+bool biasBear = h1Bear and h4Bear
+
+// ----- Setup parameters
+int swingLen              = input.int(3, "Confirmed pivot length", minval = 2, maxval = 15, group = G_SETUP)
+int maxBarsSweepToChoch   = input.int(12, "Max bars: sweep → CHoCH", minval = 2, maxval = 50, group = G_SETUP)
+int maxBarsChochToFvg     = input.int(8, "Max bars: CHoCH → FVG", minval = 1, maxval = 30, group = G_SETUP)
+int pendingExpiryBars     = input.int(12, "FVG limit order expiry (bars)", minval = 1, maxval = 50, group = G_SETUP)
+int atrLen                = input.int(14, "ATR length", minval = 2, group = G_SETUP)
+float maxSweepDepthAtr    = input.float(1.00, "Maximum sweep depth (ATR)", minval = 0.10, step = 0.05, group = G_SETUP)
+float displacementAtr    = input.float(0.60, "Minimum CHoCH candle body (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
+float minFvgAtr           = input.float(0.10, "Minimum FVG size (ATR)", minval = 0.0, step = 0.01, group = G_SETUP)
+string entryMode          = input.string("Midpoint", "FVG entry", options = ["Midpoint", "Proximal edge"], group = G_SETUP)
+float slBufferAtr         = input.float(0.10, "SL buffer behind sweep (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
+float minStopAtr          = input.float(0.40, "Minimum stop distance (ATR)", minval = 0.10, step = 0.05, group = G_SETUP)
+float maxStopAtr          = input.float(2.50, "Maximum stop distance (ATR)", minval = 0.50, step = 0.10, group = G_SETUP)
+
+// ----- Risk
+float accountSize         = input.float(100000, "Reference account size (USD)", minval = 1000, step = 1000, group = G_RISK)
+float riskPercent         = input.float(0.50, "Risk per trade (%)", minval = 0.05, maxval = 2.0, step = 0.05, group = G_RISK)
+float rewardRisk          = input.float(3.0, "Take profit (R)", minval = 1.0, maxval = 10.0, step = 0.25, group = G_RISK)
+float breakEvenAtR        = input.float(1.50, "Move SL to BE after (R)", minval = 0.5, maxval = 5.0, step = 0.25, group = G_RISK)
+float beOffsetPrice       = input.float(0.10, "BE offset for costs (USD/oz)", minval = 0.0, step = 0.01, group = G_RISK)
+float dailyLossStopPct    = input.float(1.00, "Stop new entries after daily loss (%)", minval = 0.5, maxval = 5.0, step = 0.25, group = G_RISK)
+float totalLossStopPct    = input.float(5.00, "Stop new entries after total equity loss (%)", minval = 1.0, maxval = 10.0, step = 0.5, group = G_RISK)
+
+// MT5 XAUUSD defaults. Verify in MT5: Market Watch -> Specification.
+float mt5ContractSize     = input.float(100.0, "MT5 contract size: oz per 1 lot", minval = 1.0, step = 1.0, group = G_RISK)
+float mt5MinLot           = input.float(0.01, "MT5 minimum lot", minval = 0.001, step = 0.001, group = G_RISK)
+float mt5LotStep          = input.float(0.01, "MT5 lot step", minval = 0.001, step = 0.001, group = G_RISK)
+float mt5MaxLot           = input.float(100.0, "MT5 maximum lot", minval = 0.01, step = 0.01, group = G_RISK)
+
+// TradingView point value override. 0 = use syminfo.pointvalue.
+float pointValueOverride  = input.float(0.0, "Backtest point value override (0 = automatic)", minval = 0.0, step = 0.01, group = G_RISK)
+float backtestQtyStep     = input.float(1.0, "Backtest quantity step", minval = 0.01, step = 0.01, group = G_RISK)
+
+// ----- Session
+string nyTimezone = input.string("America/New_York", "Session timezone", group = G_SESSION)
+string nySession  = input.session("0930-1200", "NY Open trading window", group = G_SESSION)
+
+// ----- Manual fundamental blackout
+bool useNewsFilter = input.bool(true, "Enable manual news blackout", group = G_NEWS)
+int newsBeforeMin  = input.int(30, "Minutes blocked before event", minval = 0, maxval = 180, group = G_NEWS)
+int newsAfterMin   = input.int(30, "Minutes blocked after event", minval = 0, maxval = 180, group = G_NEWS)
+
+bool news1On = input.bool(false, "Use event 1", inline = "N1", group = G_NEWS)
+int news1    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 1", inline = "N1", group = G_NEWS)
+bool news2On = input.bool(false, "Use event 2", inline = "N2", group = G_NEWS)
+int news2    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 2", inline = "N2", group = G_NEWS)
+bool news3On = input.bool(false, "Use event 3", inline = "N3", group = G_NEWS)
+int news3    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 3", inline = "N3", group = G_NEWS)
+bool news4On = input.bool(false, "Use event 4", inline = "N4", group = G_NEWS)
+int news4    = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Event 4", inline = "N4", group = G_NEWS)
+
+// ----- Visuals
+bool showSessionBg = input.bool(true, "Highlight NY window", group = G_VIS)
+bool showNewsBg    = input.bool(true, "Highlight news blackout", group = G_VIS)
+bool showPivots    = input.bool(false, "Show confirmed pivots", group = G_VIS)
+bool showFvgBox    = input.bool(true, "Show active FVG", group = G_VIS)
+bool showLevels    = input.bool(true, "Show Entry / SL / BE / TP", group = G_VIS)
+
+// ----- Utility functions
+f_roundDownToStep(float value, float step) =>
+    step > 0 ? math.floor(value / step + 1e-9) * step : value
+
+f_newsBlackout(bool enabled, int eventTime, int beforeMs, int afterMs) =>
+    enabled and time_close >= eventTime - beforeMs and time <= eventTime + afterMs
+
+f_price(float value) =>
+    na(value) ? "—" : str.tostring(value, format.mintick)
+
+f_num(float value, string pattern) =>
+    na(value) ? "—" : str.tostring(value, pattern)
+
+// ----- Core time, risk and filters
+float atr = ta.atr(atrLen)
+bool timeframeOk = timeframe.period == "5"
+bool symbolOk = syminfo.basecurrency == "XAU" and syminfo.currency == "USD"
+
+int nyDOW = dayofweek(time, nyTimezone)
+bool weekdayOk = nyDOW >= dayofweek.monday and nyDOW <= dayofweek.friday
+bool inNySession = weekdayOk and not na(time(timeframe.period, nySession, nyTimezone))
+
+int beforeMs = newsBeforeMin * 60 * 1000
+int afterMs  = newsAfterMin * 60 * 1000
+bool inNewsBlackout = useNewsFilter and (
+     f_newsBlackout(news1On, news1, beforeMs, afterMs) or
+     f_newsBlackout(news2On, news2, beforeMs, afterMs) or
+     f_newsBlackout(news3On, news3, beforeMs, afterMs) or
+     f_newsBlackout(news4On, news4, beforeMs, afterMs))
+
+// New York calendar day key
+int nyDayKey = year(time, nyTimezone) * 10000 + month(time, nyTimezone) * 100 + dayofmonth(time, nyTimezone)
+var int lastNyDayKey = na
+var int tradesToday = 0
+var float dayStartNetProfit = 0.0
+bool newNyDay = na(lastNyDayKey) or nyDayKey != lastNyDayKey
+
+if newNyDay
+    lastNyDayKey := nyDayKey
+    tradesToday := 0
+    dayStartNetProfit := strategy.netprofit
+
+float dailyPnl = strategy.netprofit - dayStartNetProfit + strategy.openprofit
+bool dailyStopHit = dailyPnl <= -(accountSize * dailyLossStopPct / 100.0)
+bool totalStopHit = strategy.equity <= accountSize * (1.0 - totalLossStopPct / 100.0)
+
+// ----- Confirmed pivots
+float pivotHigh = ta.pivothigh(high, swingLen, swingLen)
+float pivotLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar  = na
+
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+    lastSwingHighBar := bar_index - swingLen
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+    lastSwingLowBar := bar_index - swingLen
+
+// ----- Setup state
+// stage: 0 = waiting sweep, 1 = waiting CHoCH, 2 = waiting FVG,
+//        3 = pending FVG limit order, 4 = open trade
+var int stage = 0
+var int direction = 0  // 1 = long, -1 = short
+
+var int sweepBar = na
+var float sweepExtreme = na
+var float chochLevel = na
+var int chochBar = na
+
+var float fvgLow = na
+var float fvgHigh = na
+var int fvgBar = na
+
+var float plannedEntry = na
+var float plannedSL = na
+var float plannedTP = na
+var float plannedBE = na
+var float plannedLots = na
+var float plannedRiskUsd = na
+var float plannedBacktestQty = na
+
+var float tradeEntry = na
+var float tradeSL = na
+var float tradeTP = na
+var float tradeBETrigger = na
+var float activeStop = na
+var bool beMoved = false
+var bool fillHandled = false
+
+var box activeFvgBox = na
+
+bool bullSweepEvent = false
+bool bearSweepEvent = false
+bool chochEvent = false
+bool planCreated = false
+bool beTriggerEvent = false
+
+bool flat = strategy.position_size == 0
+bool platformOk = (not enforceM5 or timeframeOk) and (not enforceXauUsd or symbolOk)
+bool canStartSetup = flat and stage == 0 and platformOk and inNySession and not inNewsBlackout and
+     tradesToday < maxTradesPerDay and not dailyStopHit and not totalStopHit
+
+// ----- Reset invalid or expired setups
+bool sweepExpired = stage == 1 and bar_index - sweepBar > maxBarsSweepToChoch
+bool fvgExpired = stage == 2 and bar_index - chochBar > maxBarsChochToFvg
+bool pendingExpired = stage == 3 and bar_index - fvgBar > pendingExpiryBars
+bool sessionInvalid = stage > 0 and stage < 4 and not inNySession
+bool pendingRiskInvalid = stage == 3 and (inNewsBlackout or tradesToday >= maxTradesPerDay or dailyStopHit or totalStopHit)
+bool resetSetup = flat and stage > 0 and stage < 4 and
+     (sweepExpired or fvgExpired or pendingExpired or sessionInvalid or pendingRiskInvalid or newNyDay)
+
+if resetSetup
+    strategy.cancel("LONG")
+    strategy.cancel("SHORT")
+    stage := 0
+    direction := 0
+    sweepBar := na
+    sweepExtreme := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    plannedBacktestQty := na
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+// ----- 1) Liquidity sweep
+float bullSweepDepth = not na(lastSwingLow) ? lastSwingLow - low : na
+float bearSweepDepth = not na(lastSwingHigh) ? high - lastSwingHigh : na
+
+bool bullSweep = canStartSetup and biasBull and not na(lastSwingLow) and not na(lastSwingHigh) and
+     low < lastSwingLow and close > lastSwingLow and bullSweepDepth <= atr * maxSweepDepthAtr and
+     bar_index > lastSwingLowBar and barstate.isconfirmed
+
+bool bearSweep = canStartSetup and biasBear and not na(lastSwingHigh) and not na(lastSwingLow) and
+     high > lastSwingHigh and close < lastSwingHigh and bearSweepDepth <= atr * maxSweepDepthAtr and
+     bar_index > lastSwingHighBar and barstate.isconfirmed
+
+if bullSweep
+    stage := 1
+    direction := 1
+    sweepBar := bar_index
+    sweepExtreme := low
+    chochLevel := lastSwingHigh
+    bullSweepEvent := true
+
+else if bearSweep
+    stage := 1
+    direction := -1
+    sweepBar := bar_index
+    sweepExtreme := high
+    chochLevel := lastSwingLow
+    bearSweepEvent := true
+
+// Keep the most extreme sweep point while waiting for CHoCH.
+if stage == 1 and direction == 1
+    sweepExtreme := math.min(sweepExtreme, low)
+if stage == 1 and direction == -1
+    sweepExtreme := math.max(sweepExtreme, high)
+
+// ----- 2) Change of Character
+float candleBody = math.abs(close - open)
+bool displacementOk = displacementAtr <= 0 or candleBody >= atr * displacementAtr
+
+bool bullishChoch = stage == 1 and direction == 1 and bar_index > sweepBar and
+     close > chochLevel and displacementOk and barstate.isconfirmed
+
+bool bearishChoch = stage == 1 and direction == -1 and bar_index > sweepBar and
+     close < chochLevel and displacementOk and barstate.isconfirmed
+
+if bullishChoch or bearishChoch
+    stage := 2
+    chochBar := bar_index
+    chochEvent := true
+
+// ----- 3) Fair Value Gap after CHoCH
+bool bullishFvg = stage == 2 and direction == 1 and bar_index >= chochBar and
+     low > high[2] and (low - high[2]) >= atr * minFvgAtr and barstate.isconfirmed
+
+bool bearishFvg = stage == 2 and direction == -1 and bar_index >= chochBar and
+     high < low[2] and (low[2] - high) >= atr * minFvgAtr and barstate.isconfirmed
+
+if bullishFvg or bearishFvg
+    fvgLow := bullishFvg ? high[2] : high
+    fvgHigh := bullishFvg ? low : low[2]
+    fvgBar := bar_index
+
+    float proximalEntry = direction == 1 ? fvgHigh : fvgLow
+    plannedEntry := entryMode == "Midpoint" ? (fvgLow + fvgHigh) / 2.0 : proximalEntry
+    plannedSL := direction == 1 ? sweepExtreme - atr * slBufferAtr : sweepExtreme + atr * slBufferAtr
+
+    float stopDistance = math.abs(plannedEntry - plannedSL)
+    float riskUsd = accountSize * riskPercent / 100.0
+    float rawLots = stopDistance > 0 ? riskUsd / (stopDistance * mt5ContractSize) : na
+    float roundedLots = not na(rawLots) ? f_roundDownToStep(rawLots, mt5LotStep) : na
+
+    float tvPointValue = pointValueOverride > 0 ? pointValueOverride : syminfo.pointvalue
+    float rawBacktestQty = stopDistance > 0 and tvPointValue > 0 ? riskUsd / (stopDistance * tvPointValue) : na
+    float roundedBacktestQty = not na(rawBacktestQty) ? f_roundDownToStep(rawBacktestQty, backtestQtyStep) : na
+
+    bool stopDistanceOk = stopDistance >= atr * minStopAtr and stopDistance <= atr * maxStopAtr
+    bool lotOk = not na(roundedLots) and roundedLots >= mt5MinLot
+    bool backtestQtyOk = not na(roundedBacktestQty) and roundedBacktestQty > 0
+
+    if stopDistanceOk and lotOk and backtestQtyOk
+        plannedLots := math.min(roundedLots, mt5MaxLot)
+        plannedRiskUsd := plannedLots * stopDistance * mt5ContractSize
+        plannedBacktestQty := roundedBacktestQty
+        plannedTP := plannedEntry + direction * stopDistance * rewardRisk
+        plannedBE := plannedEntry + direction * stopDistance * breakEvenAtR
+        stage := 3
+        planCreated := true
+
+        if showFvgBox
+            if not na(activeFvgBox)
+                box.delete(activeFvgBox)
+            activeFvgBox := box.new(
+                 left = bar_index - 2,
+                 top = fvgHigh,
+                 right = bar_index,
+                 bottom = fvgLow,
+                 xloc = xloc.bar_index,
+                 extend = extend.right,
+                 bgcolor = direction == 1 ? color.new(color.teal, 85) : color.new(color.orange, 85),
+                 border_color = direction == 1 ? color.teal : color.orange)
+    else
+        stage := 0
+        direction := 0
+        fvgLow := na
+        fvgHigh := na
+        fvgBar := na
+        plannedEntry := na
+        plannedSL := na
+
+// ----- Pending limit order for the Strategy Tester
+if stage == 3 and flat
+    if direction == 1
+        strategy.entry(
+             "LONG",
+             strategy.long,
+             qty = plannedBacktestQty,
+             limit = plannedEntry,
+             alert_message = "EKV GOLD | BUY LIMIT filled")
+    else
+        strategy.entry(
+             "SHORT",
+             strategy.short,
+             qty = plannedBacktestQty,
+             limit = plannedEntry,
+             alert_message = "EKV GOLD | SELL LIMIT filled")
+
+// Dynamic alert when a complete trade plan is ready for manual MT5 entry.
+if planCreated
+    string orderType = direction == 1 ? "BUY LIMIT" : "SELL LIMIT"
+    string planMessage =
+         "EKV GOLD TRADER\n" +
+         orderType + " " + syminfo.ticker + "\n" +
+         "Entry: " + f_price(plannedEntry) + "\n" +
+         "SL: " + f_price(plannedSL) + "\n" +
+         "BE trigger: " + f_price(plannedBE) + " (" + f_num(breakEvenAtR, "#.##") + "R)\n" +
+         "TP: " + f_price(plannedTP) + " (" + f_num(rewardRisk, "#.##") + "R)\n" +
+         "MT5 lot: " + f_num(plannedLots, "#.###") + "\n" +
+         "Estimated risk: $" + f_num(plannedRiskUsd, "#.##")
+    alert(planMessage, alert.freq_once_per_bar_close)
+
+// ----- Detect and initialize a filled trade once
+if strategy.position_size != 0 and not fillHandled
+    fillHandled := true
+    stage := 4
+    tradesToday += 1
+    tradeEntry := strategy.position_avg_price
+    tradeSL := plannedSL
+    float actualRiskDistance = math.abs(tradeEntry - tradeSL)
+    tradeTP := tradeEntry + direction * actualRiskDistance * rewardRisk
+    tradeBETrigger := tradeEntry + direction * actualRiskDistance * breakEvenAtR
+    activeStop := tradeSL
+    beMoved := false
+
+// ----- Trade management: full position to 3R, SL to BE+costs after 1.5R
+if strategy.position_size > 0
+    if not beMoved and high >= tradeBETrigger
+        beMoved := true
+        beTriggerEvent := true
+    activeStop := beMoved ? tradeEntry + beOffsetPrice : tradeSL
+    strategy.exit(
+         "LONG EXIT",
+         from_entry = "LONG",
+         stop = activeStop,
+         limit = tradeTP,
+         alert_message = "EKV GOLD | LONG exit")
+
+if strategy.position_size < 0
+    if not beMoved and low <= tradeBETrigger
+        beMoved := true
+        beTriggerEvent := true
+    activeStop := beMoved ? tradeEntry - beOffsetPrice : tradeSL
+    strategy.exit(
+         "SHORT EXIT",
+         from_entry = "SHORT",
+         stop = activeStop,
+         limit = tradeTP,
+         alert_message = "EKV GOLD | SHORT exit")
+
+if beTriggerEvent
+    alert(
+         "EKV GOLD | BE TRIGGER | Move MT5 SL to " + f_price(activeStop),
+         alert.freq_once_per_bar_close)
+
+// ----- Reset after trade closes
+if fillHandled and strategy.position_size == 0 and stage == 4
+    fillHandled := false
+    stage := 0
+    direction := 0
+    sweepBar := na
+    sweepExtreme := na
+    chochLevel := na
+    chochBar := na
+    fvgLow := na
+    fvgHigh := na
+    fvgBar := na
+    plannedEntry := na
+    plannedSL := na
+    plannedTP := na
+    plannedBE := na
+    plannedLots := na
+    plannedRiskUsd := na
+    plannedBacktestQty := na
+    tradeEntry := na
+    tradeSL := na
+    tradeTP := na
+    tradeBETrigger := na
+    activeStop := na
+    beMoved := false
+    if not na(activeFvgBox)
+        box.delete(activeFvgBox)
+        activeFvgBox := na
+
+// ----- Visuals
+bgcolor(showSessionBg and inNySession ? color.new(color.blue, 93) : na, title = "NY Open")
+bgcolor(showNewsBg and inNewsBlackout ? color.new(color.red, 85) : na, title = "News blackout")
+
+plotshape(showPivots and not na(pivotHigh), title = "Pivot High", style = shape.triangledown,
+     location = location.abovebar, offset = -swingLen, size = size.tiny, color = color.new(color.red, 30))
+plotshape(showPivots and not na(pivotLow), title = "Pivot Low", style = shape.triangleup,
+     location = location.belowbar, offset = -swingLen, size = size.tiny, color = color.new(color.green, 30))
+
+plotshape(bullSweepEvent, title = "Bullish liquidity sweep", text = "SWEEP",
+     style = shape.labelup, location = location.belowbar, size = size.tiny, color = color.teal, textcolor = color.white)
+plotshape(bearSweepEvent, title = "Bearish liquidity sweep", text = "SWEEP",
+     style = shape.labeldown, location = location.abovebar, size = size.tiny, color = color.orange, textcolor = color.white)
+plotshape(chochEvent and direction == 1, title = "Bullish CHoCH", text = "CHoCH",
+     style = shape.labelup, location = location.belowbar, size = size.tiny, color = color.green, textcolor = color.white)
+plotshape(chochEvent and direction == -1, title = "Bearish CHoCH", text = "CHoCH",
+     style = shape.labeldown, location = location.abovebar, size = size.tiny, color = color.red, textcolor = color.white)
+plotshape(planCreated and direction == 1, title = "Long plan", text = "BUY LIMIT",
+     style = shape.labelup, location = location.belowbar, size = size.small, color = color.green, textcolor = color.white)
+plotshape(planCreated and direction == -1, title = "Short plan", text = "SELL LIMIT",
+     style = shape.labeldown, location = location.abovebar, size = size.small, color = color.red, textcolor = color.white)
+
+float displayEntry = stage == 4 ? tradeEntry : stage == 3 ? plannedEntry : na
+float displaySL    = stage == 4 ? activeStop : stage == 3 ? plannedSL : na
+float displayBE    = stage == 4 ? tradeBETrigger : stage == 3 ? plannedBE : na
+float displayTP    = stage == 4 ? tradeTP : stage == 3 ? plannedTP : na
+
+plot(showLevels ? displayEntry : na, "Entry", color = color.new(color.white, 0), linewidth = 2, style = plot.style_linebr)
+plot(showLevels ? displaySL : na, "Stop Loss", color = color.new(color.red, 0), linewidth = 2, style = plot.style_linebr)
+plot(showLevels ? displayBE : na, "BE trigger", color = color.new(color.yellow, 0), linewidth = 1, style = plot.style_linebr)
+plot(showLevels ? displayTP : na, "Take Profit", color = color.new(color.lime, 0), linewidth = 2, style = plot.style_linebr)
+
+// ----- Dashboard
+var table dashboard = table.new(
+     position.top_right, 2, 15,
+     bgcolor = color.new(color.black, 15),
+     frame_color = color.new(color.gray, 40),
+     frame_width = 1,
+     border_color = color.new(color.gray, 70),
+     border_width = 1)
+
+string stageText = switch stage
+    0 => "Waiting for sweep"
+    1 => "Sweep → waiting CHoCH"
+    2 => "CHoCH → waiting FVG"
+    3 => "Trade plan ready"
+    4 => beMoved ? "Open — BE active" : "Open — original SL"
+    => "—"
+
+string directionText = direction == 1 ? "LONG" : direction == -1 ? "SHORT" : "—"
+color directionColor = direction == 1 ? color.lime : direction == -1 ? color.red : color.silver
+
+int score =
+     (direction == 1 ? (h1Bull ? 20 : 0) + (h4Bull ? 20 : 0) :
+      direction == -1 ? (h1Bear ? 20 : 0) + (h4Bear ? 20 : 0) : 0) +
+     (stage >= 1 ? 20 : 0) +
+     (stage >= 2 ? 20 : 0) +
+     (stage >= 3 ? 10 : 0) +
+     (inNySession ? 10 : 0)
+
+if barstate.islast
+    table.cell(dashboard, 0, 0, "EKV GOLD TRADER", text_color = color.white, bgcolor = color.new(color.blue, 40))
+    table.cell(dashboard, 1, 0, "v1.0", text_color = color.white, bgcolor = color.new(color.blue, 40))
+
+    table.cell(dashboard, 0, 1, "Chart")
+    table.cell(dashboard, 1, 1, syminfo.ticker + " / " + timeframe.period,
+         text_color = platformOk ? color.lime : color.red)
+
+    table.cell(dashboard, 0, 2, "H1 / H4 bias")
+    table.cell(dashboard, 1, 2,
+         biasBull ? "BULL / BULL" : biasBear ? "BEAR / BEAR" : "NO ALIGNMENT",
+         text_color = biasBull ? color.lime : biasBear ? color.red : color.orange)
+
+    table.cell(dashboard, 0, 3, "NY session")
+    table.cell(dashboard, 1, 3, inNySession ? "ACTIVE" : "CLOSED",
+         text_color = inNySession ? color.lime : color.silver)
+
+    table.cell(dashboard, 0, 4, "News")
+    table.cell(dashboard, 1, 4, inNewsBlackout ? "BLOCKED" : "CLEAR",
+         text_color = inNewsBlackout ? color.red : color.lime)
+
+    table.cell(dashboard, 0, 5, "State")
+    table.cell(dashboard, 1, 5, stageText, text_color = directionColor)
+
+    table.cell(dashboard, 0, 6, "Direction / score")
+    table.cell(dashboard, 1, 6, directionText + " / " + str.tostring(score) + "%",
+         text_color = directionColor)
+
+    table.cell(dashboard, 0, 7, "Entry")
+    table.cell(dashboard, 1, 7, f_price(displayEntry))
+
+    table.cell(dashboard, 0, 8, "Stop Loss")
+    table.cell(dashboard, 1, 8, f_price(displaySL), text_color = color.red)
+
+    table.cell(dashboard, 0, 9, "BE trigger")
+    table.cell(dashboard, 1, 9, f_price(displayBE), text_color = color.yellow)
+
+    table.cell(dashboard, 0, 10, "Take Profit")
+    table.cell(dashboard, 1, 10, f_price(displayTP), text_color = color.lime)
+
+    table.cell(dashboard, 0, 11, "MT5 lot")
+    table.cell(dashboard, 1, 11, f_num(plannedLots, "#.###"), text_color = color.aqua)
+
+    table.cell(dashboard, 0, 12, "Risk")
+    table.cell(dashboard, 1, 12,
+         f_num(riskPercent, "#.##") + "% / $" + f_num(plannedRiskUsd, "#.##"))
+
+    table.cell(dashboard, 0, 13, "Trades today")
+    table.cell(dashboard, 1, 13, str.tostring(tradesToday) + " / " + str.tostring(maxTradesPerDay))
+
+    table.cell(dashboard, 0, 14, "Daily P/L guard")
+    table.cell(dashboard, 1, 14,
+         "$" + f_num(dailyPnl, "#.##") + (dailyStopHit ? " — STOP" : ""),
+         text_color = dailyStopHit ? color.red : dailyPnl >= 0 ? color.lime : color.orange)

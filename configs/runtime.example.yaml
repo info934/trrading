@@ -1,0 +1,16 @@
+# Safety limits for the future Python layer. These values are documentation
+# until the Python runtime is implemented and validates/enforces them.
+storage:
+  max_workspace_gb: 5
+  data_directory: "python/data"
+  reports_directory: "reports"
+  report_retention_days: 30
+
+logging:
+  level: "INFO"
+  max_file_mb: 10
+  backup_count: 5
+
+execution:
+  max_parallel_workers: 2
+  max_optimization_trials: 500

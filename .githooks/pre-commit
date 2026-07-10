@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Reject large staged files before they enter Git history.
+# Historical market data and generated reports belong outside the repository.
+limit_bytes=26214400
+failed=0
+
+git diff --cached --name-only --diff-filter=ACMR -z | while IFS= read -r -d '' file; do
+    [ -f "$file" ] || continue
+
+    size=$(wc -c < "$file" | tr -d ' ')
+    if [ "$size" -gt "$limit_bytes" ]; then
+        echo "ERROR: '$file' has $size bytes; repository limit is $limit_bytes bytes (25 MiB)." >&2
+        echo "Store datasets/reports outside Git or use an explicitly approved artifact store." >&2
+        failed=1
+    fi
+
+    case "$file" in
+        python/data/*|reports/*)
+            case "$file" in
+                */README.md|*/.gitkeep) ;;
+                *)
+                    echo "ERROR: generated data/report is staged: '$file'." >&2
+                    failed=1
+                    ;;
+            esac
+            ;;
+    esac
+done
+# The loop may execute in a subshell, so perform a second size-only check whose
+# exit status is reliable across Git for Windows shells.
+git diff --cached --name-only --diff-filter=ACMR -z | while IFS= read -r -d '' file; do
+    [ -f "$file" ] || continue
+    size=$(wc -c < "$file" | tr -d ' ')
+    [ "$size" -le "$limit_bytes" ] || exit 1
+    case "$file" in
+        python/data/*|reports/*)
+            case "$file" in */README.md|*/.gitkeep) ;; *) exit 1 ;; esac
+            ;;
+    esac
+done
