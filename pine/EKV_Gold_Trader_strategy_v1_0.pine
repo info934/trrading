@@ -22,16 +22,18 @@ string h4Tf = input.timeframe("240", "H4 timeframe", group = G_BIAS)
 int fastLen = input.int(50, "Fast EMA", minval = 2, group = G_BIAS)
 int slowLen = input.int(200, "Slow EMA", minval = 10, group = G_BIAS)
 bool useSlope = input.bool(true, "Require fast EMA slope", group = G_BIAS)
+string signalProfile = input.string("Balanced experimental", "Backtest profile", options = ["Production", "Balanced experimental"], group = G_BIAS, tooltip = "Production requires H1 and H4 alignment. Balanced allows one directional HTF bias only when the other HTF is not opposite.")
 
 int swingLen = input.int(3, "Confirmed pivot length", minval = 2, maxval = 15, group = G_SETUP)
 int maxSweepToChoch = input.int(12, "Max bars: sweep → CHoCH", minval = 2, maxval = 50, group = G_SETUP)
 int maxChochToFvg = input.int(8, "Max bars: CHoCH → FVG", minval = 1, maxval = 30, group = G_SETUP)
-int pendingExpiry = input.int(12, "FVG limit expiry (bars)", minval = 1, maxval = 50, group = G_SETUP)
+int pendingExpiry = input.int(20, "FVG limit expiry (bars)", minval = 1, maxval = 50, group = G_SETUP)
 int atrLen = input.int(14, "ATR length", minval = 2, group = G_SETUP)
 float maxSweepDepthAtr = input.float(1.0, "Maximum sweep depth (ATR)", minval = 0.1, step = 0.05, group = G_SETUP)
-float displacementAtr = input.float(0.6, "Minimum CHoCH body (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
-float minFvgAtr = input.float(0.1, "Minimum FVG size (ATR)", minval = 0.0, step = 0.01, group = G_SETUP)
-string entryMode = input.string("Midpoint", "FVG limit entry", options = ["Midpoint", "Proximal edge"], group = G_SETUP)
+float displacementAtr = input.float(0.3, "Minimum CHoCH body (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
+float minFvgAtr = input.float(0.05, "Minimum FVG size (ATR)", minval = 0.0, step = 0.01, group = G_SETUP)
+string entryMode = input.string("Proximal edge", "FVG limit entry", options = ["Midpoint", "Proximal edge"], group = G_SETUP)
+string executionMode = input.string("Market on FVG (experimental)", "Backtest execution", options = ["Limit retracement", "Market on FVG (experimental)"], group = G_SETUP, tooltip = "Market mode increases the research sample but is not equivalent to the production limit-retracement workflow.")
 float slBufferAtr = input.float(0.1, "SL buffer behind sweep (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
 float minStopAtr = input.float(0.4, "Minimum stop distance (ATR)", minval = 0.1, step = 0.05, group = G_SETUP)
 float maxStopAtr = input.float(2.5, "Maximum stop distance (ATR)", minval = 0.5, step = 0.1, group = G_SETUP)
@@ -72,6 +74,10 @@ bool h4Bull = h4Close > h4Slow and h4Fast > h4Slow and (not useSlope or h4Fast >
 bool h4Bear = h4Close < h4Slow and h4Fast < h4Slow and (not useSlope or h4Fast < h4FastPrev)
 bool biasBull = h1Bull and h4Bull
 bool biasBear = h1Bear and h4Bear
+bool productionProfile = signalProfile == "Production"
+bool balancedProfile = signalProfile == "Balanced experimental"
+bool biasGateBull = productionProfile ? biasBull : (h1Bull or h4Bull) and not (h1Bear or h4Bear)
+bool biasGateBear = productionProfile ? biasBear : (h1Bear or h4Bear) and not (h1Bull or h4Bull)
 
 float atr = ta.atr(atrLen)
 bool timeframeOk = timeframe.isminutes and timeframe.multiplier == 5
@@ -131,8 +137,8 @@ float bullSweepDepth = not na(lastSwingLow) ? lastSwingLow - low : na
 float bearSweepDepth = not na(lastSwingHigh) ? high - lastSwingHigh : na
 bool rawBullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow and bullSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingLowBar and barstate.isconfirmed
 bool rawBearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh and bearSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingHighBar and barstate.isconfirmed
-bool bullSweep = canStart and biasBull and rawBullSweep and not rawBearSweep
-bool bearSweep = canStart and biasBear and rawBearSweep and not rawBullSweep
+bool bullSweep = canStart and biasGateBull and rawBullSweep and not rawBearSweep
+bool bearSweep = canStart and biasGateBear and rawBearSweep and not rawBullSweep
 if bullSweep
     stage := 1
     direction := 1
@@ -186,7 +192,9 @@ if bullFvg or bearFvg
     float fvgLow = bullFvg ? high[2] : high
     float fvgHigh = bullFvg ? low : low[2]
     float proximal = direction == 1 ? fvgHigh : fvgLow
-    float entry = entryMode == "Midpoint" ? (fvgLow + fvgHigh) / 2.0 : proximal
+    bool marketOnFvg = executionMode == "Market on FVG (experimental)"
+    float limitEntry = entryMode == "Midpoint" ? (fvgLow + fvgHigh) / 2.0 : proximal
+    float entry = marketOnFvg ? close : limitEntry
     float stop = direction == 1 ? sweepExtreme - atr * slBufferAtr : sweepExtreme + atr * slBufferAtr
     float stopDistance = direction == 1 ? entry - stop : stop - entry
     float riskUsd = strategy.equity * riskPercent / 100.0
@@ -202,7 +210,10 @@ if bullFvg or bearFvg
         fvgBar := bar_index
         stage := 3
         string entryId = direction == 1 ? "NY-SMC-L" : "NY-SMC-S"
-        strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty, limit = plannedEntry)
+        if marketOnFvg
+            strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty)
+        else
+            strategy.entry(entryId, direction == 1 ? strategy.long : strategy.short, qty = plannedQty, limit = plannedEntry)
         strategy.exit("NY-SMC-EXIT", from_entry = entryId, stop = plannedSL, limit = plannedTP)
     else
         stage := 0
@@ -269,3 +280,4 @@ plotshape(bullSweep, "Bullish sweep", shape.triangleup, location.belowbar, color
 plotshape(bearSweep, "Bearish sweep", shape.triangledown, location.abovebar, color = color.orange, size = size.tiny)
 plotshape(bullChoch or bearChoch, "CHoCH", shape.circle, location.abovebar, color = color.yellow, size = size.tiny)
 bgcolor(inNySession ? color.new(color.blue, 94) : na, title = "NY Open")
+plotchar(balancedProfile, "Balanced experimental", "E", location.top, color = color.orange, size = size.tiny)

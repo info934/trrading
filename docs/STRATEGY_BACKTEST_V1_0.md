@@ -11,3 +11,15 @@ walk-forward and out-of-sample comparison, not as evidence of live performance.
 Use standard OANDA:XAUUSD M5 candles. Start with Production-style defaults,
 review the Strategy Tester list of trades, and test multiple non-overlapping
 date windows before changing inputs. Keep any exports in `reports/`.
+
+The backtest defaults to `Balanced experimental` to provide a larger research
+sample. It is intentionally not the production signal standard: use
+`Production` to require H1 and H4 EMA alignment before drawing conclusions.
+Its experimental defaults also use the proximal FVG edge, a longer pending
+window, and lower displacement/FVG thresholds. Restore the stricter values
+before comparing the result with Production.
+
+`Market on FVG (experimental)` is the default execution setting for a larger
+sample of backtest trades. It enters after a confirmed FVG instead of waiting
+for a limit retracement, so it must never be treated as equivalent to the
+indicator's production MT5 workflow.
