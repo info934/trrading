@@ -1,6 +1,8 @@
-# EKV Gold Trader Indicator v1.3
+# EKV Gold Trader Indicator v1.3 — NY SMC
 
-v1.3 je signalizační Pine v6 indikátor pro ruční exekuci v MT5. Nepoužívá
+v1.3 je NY SMC signalizační Pine v6 indikátor pro ruční exekuci v MT5. Používá
+liquidity sweep, CHoCH, displacement/FVG a limitní retracement v NY Open session.
+Nepoužívá
 `strategy()`, Strategy Tester ani Bar Magnifier a nikdy nepotvrzuje skutečný fill.
 
 ## Instalace
