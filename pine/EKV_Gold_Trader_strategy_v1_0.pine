@@ -36,8 +36,8 @@ float minFvgAtr = input.float(0.05, "Minimum FVG size (ATR)", minval = 0.0, step
 string entryMode = input.string("Proximal edge", "FVG limit entry", options = ["Midpoint", "Proximal edge"], group = G_SETUP)
 string executionMode = input.string("Market on FVG (experimental)", "Backtest execution", options = ["Limit retracement", "Market on FVG (experimental)"], group = G_SETUP, tooltip = "Market mode increases the research sample but is not equivalent to the production limit-retracement workflow.")
 float slBufferAtr = input.float(0.1, "SL buffer behind sweep (ATR)", minval = 0.0, step = 0.05, group = G_SETUP)
-float minStopAtr = input.float(0.4, "Minimum stop distance (ATR)", minval = 0.1, step = 0.05, group = G_SETUP)
-float maxStopAtr = input.float(2.5, "Maximum stop distance (ATR)", minval = 0.5, step = 0.1, group = G_SETUP)
+float minStopAtr = input.float(0.1, "Minimum stop distance (ATR)", minval = 0.1, step = 0.05, group = G_SETUP, tooltip = "Wide research default. Tighten this range only after reviewing the risk-reject counter.")
+float maxStopAtr = input.float(10.0, "Maximum stop distance (ATR)", minval = 0.5, step = 0.1, group = G_SETUP, tooltip = "Wide research default. Tighten this range only after reviewing the risk-reject counter.")
 
 float riskPercent = input.float(0.5, "Risk per trade (% equity)", minval = 0.05, maxval = 2.0, step = 0.05, group = G_RISK)
 float rewardRisk = input.float(3.0, "Take profit (R)", minval = 1.0, maxval = 10.0, step = 0.25, group = G_RISK)
