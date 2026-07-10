@@ -1,6 +1,6 @@
 //@version=6
 indicator(
-     "EKV Gold Trader Indicator v1.1 — NY Open CHoCH + FVG",
+     "EKV Gold Trader Indicator v1.2 — NY Open CHoCH + FVG",
      overlay = true,
      max_boxes_count = 50,
      max_labels_count = 100,
@@ -22,6 +22,9 @@ bool enforceM5      = input.bool(true, "Allow signals only on M5", group = G_GEN
 bool enforceXauUsd  = input.bool(false, "Allow signals only on XAUUSD", group = G_GENERAL,
      tooltip = "Leave OFF if your broker uses a symbol suffix, e.g. XAUUSD.a.")
 int maxTradesPerDay = input.int(2, "Maximum entry touches per NY day", minval = 1, maxval = 5, group = G_GENERAL)
+string signalProfile = input.string("Balanced", "Signal strictness",
+     options = ["Balanced", "Strict v1.0", "Structure only"], group = G_GENERAL,
+     tooltip = "Balanced accepts an aligned H1 or H4 bias. Strict requires both. Structure only ignores EMA bias for diagnostics.")
 
 string h1Tf      = input.timeframe("60", "H1 timeframe", group = G_BIAS)
 string h4Tf      = input.timeframe("240", "H4 timeframe", group = G_BIAS)
@@ -44,6 +47,8 @@ bool h4Bull = h4Close > h4Slow and h4Fast > h4Slow and (not useEmaSlope or h4Fas
 bool h4Bear = h4Close < h4Slow and h4Fast < h4Slow and (not useEmaSlope or h4Fast < h4FastPrev)
 bool biasBull = h1Bull and h4Bull
 bool biasBear = h1Bear and h4Bear
+bool biasGateBull = signalProfile == "Strict v1.0" ? biasBull : signalProfile == "Balanced" ? (h1Bull or h4Bull) : true
+bool biasGateBear = signalProfile == "Strict v1.0" ? biasBear : signalProfile == "Balanced" ? (h1Bear or h4Bear) : true
 
 int swingLen            = input.int(3, "Confirmed pivot length", minval = 2, maxval = 15, group = G_SETUP)
 int maxBarsSweepToChoch = input.int(12, "Max bars: sweep → CHoCH", minval = 2, maxval = 50, group = G_SETUP)
@@ -213,8 +218,8 @@ float bullSweepDepth = not na(lastSwingLow) ? lastSwingLow - low : na
 float bearSweepDepth = not na(lastSwingHigh) ? high - lastSwingHigh : na
 bool rawBullSweep = not na(lastSwingLow) and not na(lastSwingHigh) and low < lastSwingLow and close > lastSwingLow and bullSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingLowBar and barstate.isconfirmed
 bool rawBearSweep = not na(lastSwingHigh) and not na(lastSwingLow) and high > lastSwingHigh and close < lastSwingHigh and bearSweepDepth <= atr * maxSweepDepthAtr and bar_index > lastSwingHighBar and barstate.isconfirmed
-bool bullSweep = canStartSetup and biasBull and rawBullSweep
-bool bearSweep = canStartSetup and biasBear and rawBearSweep
+bool bullSweep = canStartSetup and biasGateBull and rawBullSweep
+bool bearSweep = canStartSetup and biasGateBear and rawBearSweep
 
 var int rawSweepCount = 0
 var int qualifiedSweepCount = 0
@@ -376,14 +381,15 @@ plot(showLevels ? displayEntry : na, "Entry", color.white, 2, plot.style_linebr)
 plot(showLevels ? displaySL : na, "Stop Loss", color.red, 2, plot.style_linebr)
 plot(showLevels ? displayBE : na, "BE trigger", color.yellow, 1, plot.style_linebr)
 plot(showLevels ? displayTP : na, "Take Profit", color.lime, 2, plot.style_linebr)
+plot(showDiagnostics ? ta.ema(close, 20) : na, "Diagnostic EMA 20 — indicator running", color.new(color.aqua, 35), 1)
 
-var table dashboard = table.new(position.top_right, 2, 15, bgcolor = color.new(color.black, 15), frame_color = color.new(color.gray, 40), frame_width = 1)
+var table dashboard = table.new(position.top_right, 2, 16, bgcolor = color.new(color.black, 15), frame_color = color.new(color.gray, 40), frame_width = 1)
 string stageText = stage == 0 ? "Waiting for sweep" : stage == 1 ? "Waiting CHoCH" : stage == 2 ? "Waiting FVG" : stage == 3 ? "Pending plan" : beMoved ? "Virtual trade — BE" : "Virtual trade — SL"
 string directionText = direction == 1 ? "LONG" : direction == -1 ? "SHORT" : "—"
 color directionColor = direction == 1 ? color.lime : direction == -1 ? color.red : color.silver
 if barstate.islast
     table.cell(dashboard, 0, 0, "EKV INDICATOR", text_color = color.white, bgcolor = color.new(color.blue, 40))
-    table.cell(dashboard, 1, 0, "v1.1", text_color = color.white, bgcolor = color.new(color.blue, 40))
+    table.cell(dashboard, 1, 0, "v1.2", text_color = color.white, bgcolor = color.new(color.blue, 40))
     table.cell(dashboard, 0, 1, "Chart")
     table.cell(dashboard, 1, 1, syminfo.ticker + " / " + timeframe.period, text_color = platformOk ? color.lime : color.red)
     table.cell(dashboard, 0, 2, "H1 / H4 bias")
@@ -412,3 +418,5 @@ if barstate.islast
     table.cell(dashboard, 1, 13, str.tostring(qualifiedSweepCount) + " qualified / " + str.tostring(rawSweepCount) + " raw", text_color = qualifiedSweepCount > 0 ? color.lime : rawSweepCount > 0 ? color.orange : color.red)
     table.cell(dashboard, 0, 14, "History CHoCH / plans")
     table.cell(dashboard, 1, 14, str.tostring(chochCount) + " / " + str.tostring(planCount), text_color = planCount > 0 ? color.lime : chochCount > 0 ? color.orange : color.red)
+    table.cell(dashboard, 0, 15, "Signal profile")
+    table.cell(dashboard, 1, 15, signalProfile, text_color = signalProfile == "Strict v1.0" ? color.orange : color.aqua)

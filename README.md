@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check_workspace_size.ps1
 ## Dostupné Pine verze
 
 - `pine/EKV_Gold_Trader_v1_0.txt` — původní auditovaný strategický zdroj.
-- `pine/EKV_Gold_Trader_indicator_v1_1.pine` — neplacený signalizační indikátor
+- `pine/EKV_Gold_Trader_indicator_v1_2.pine` — signalizační indikátor v1.2
   bez Strategy Testeru a Bar Magnifieru; obsahuje úrovně, dashboard a alerty.
 
 Indikátor nevytváří skutečné objednávky a jeho price-touch události nejsou
