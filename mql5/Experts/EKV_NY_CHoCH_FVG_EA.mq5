@@ -1,7 +1,7 @@
 #property copyright "EKV TradeGold"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
-#property description "NY-open CHoCH + displacement FVG + 50-61.8 retracement EA"
+#property description "NY liquidity sweep + CHoCH + FVG retracement EA"
 
 #include <Trade/Trade.mqh>
 
@@ -13,10 +13,18 @@ enum ENUM_POSITION_SIZING
 
 enum ENUM_SETUP_STAGE
   {
-   STAGE_WAIT_CHOCH = 0,
-   STAGE_WAIT_FVG   = 1,
-   STAGE_PENDING    = 2,
-   STAGE_LIVE       = 3
+   STAGE_WAIT_SWEEP = 0,
+   STAGE_WAIT_CHOCH = 1,
+   STAGE_WAIT_FVG   = 2,
+   STAGE_PENDING    = 3,
+   STAGE_LIVE       = 4
+  };
+
+enum ENUM_BIAS_PROFILE
+  {
+   BIAS_PRODUCTION = 0,
+   BIAS_BALANCED   = 1,
+   BIAS_DISABLED   = 2
   };
 
 input group "01 - Environment"
@@ -32,36 +40,43 @@ input int                  InpMaxSpreadPoints      = 80;
 
 input group "02 - Structure and FVG"
 input int                  InpSwingLength          = 3;
-input int                  InpMaxChochToFvgBars    = 12;
-input int                  InpPendingExpiryBars    = 20;
+input int                  InpMaxSweepToChochBars  = 12;
+input int                  InpMaxChochToFvgBars    = 8;
+input int                  InpPendingExpiryBars    = 12;
 input int                  InpATRPeriod            = 14;
-input double               InpMinDisplacementATR   = 0.30;
-input double               InpMinFvgATR            = 0.05;
-input double               InpFibZoneStart         = 0.500;
-input double               InpFibZoneEnd           = 0.618;
+input double               InpMaxSweepDepthATR     = 1.00;
+input double               InpMinDisplacementATR   = 0.60;
+input double               InpMinFvgATR            = 0.10;
 input double               InpSLBufferATR          = 0.10;
-input double               InpMinStopATR           = 0.10;
-input double               InpMaxStopATR           = 10.0;
+input double               InpMinStopATR           = 0.40;
+input double               InpMaxStopATR           = 2.50;
 
-input group "03 - Risk and exits"
+input group "03 - Higher timeframe bias"
+input ENUM_BIAS_PROFILE    InpBiasProfile          = BIAS_PRODUCTION;
+input int                  InpHTFFastEMA           = 50;
+input int                  InpHTFSlowEMA           = 200;
+input bool                 InpUseEMASlope          = true;
+
+input group "04 - Risk and exits"
 input ENUM_POSITION_SIZING InpSizingMode           = SIZING_RISK_PERCENT;
 input double               InpRiskPercent          = 0.50;
 input double               InpFixedLots            = 0.10;
 input double               InpLotMultiplier        = 1.00;
 input double               InpMaximumLots          = 10.0;
-input double               InpRewardRisk           = 4.0;
+input double               InpRewardRisk           = 3.0;
+input double               InpBreakEvenAtR          = 1.50;
 input int                  InpBreakEvenOffsetPoints = 10;
 
 CTrade trade;
 int g_atr_handle = INVALID_HANDLE;
+int g_h1_fast_handle = INVALID_HANDLE;
+int g_h1_slow_handle = INVALID_HANDLE;
+int g_h4_fast_handle = INVALID_HANDLE;
+int g_h4_slow_handle = INVALID_HANDLE;
 datetime g_last_bar_time = 0;
 
-ENUM_SETUP_STAGE g_stage = STAGE_WAIT_CHOCH;
+ENUM_SETUP_STAGE g_stage = STAGE_WAIT_SWEEP;
 int g_direction = 0;
-int g_structure_bias = 0;
-bool g_swing_high_crossed = false;
-bool g_swing_low_crossed = false;
-bool g_session_choch_found = false;
 bool g_had_position = false;
 bool g_be_moved = false;
 
@@ -69,14 +84,17 @@ double g_swing_high = 0.0;
 double g_swing_low = 0.0;
 datetime g_swing_high_time = 0;
 datetime g_swing_low_time = 0;
+datetime g_sweep_time = 0;
 datetime g_choch_time = 0;
+int g_bars_since_sweep = 0;
 int g_bars_since_choch = 0;
-double g_impulse_origin = 0.0;
-double g_impulse_extreme = 0.0;
-double g_be_confirm_level = 0.0;
+double g_sweep_extreme = 0.0;
+double g_sweep_reference = 0.0;
+double g_choch_level = 0.0;
 double g_planned_entry = 0.0;
 double g_planned_sl = 0.0;
 double g_planned_tp = 0.0;
+double g_planned_be_trigger = 0.0;
 double g_planned_lots = 0.0;
 
 int g_day_key = -1;
@@ -180,6 +198,47 @@ double GetATR(const int shift)
    return values[0];
   }
 
+bool ReadIndicatorValue(const int handle,const int shift,double &value)
+  {
+   double values[1];
+   if(handle==INVALID_HANDLE || CopyBuffer(handle,0,shift,1,values)!=1)
+      return false;
+   value=values[0];
+   return value!=EMPTY_VALUE;
+  }
+
+bool BiasAllows(const int direction)
+  {
+   if(InpBiasProfile==BIAS_DISABLED)
+      return true;
+
+   double h1_fast=0.0,h1_fast_prev=0.0,h1_slow=0.0;
+   double h4_fast=0.0,h4_fast_prev=0.0,h4_slow=0.0;
+   if(!ReadIndicatorValue(g_h1_fast_handle,1,h1_fast) ||
+      !ReadIndicatorValue(g_h1_fast_handle,2,h1_fast_prev) ||
+      !ReadIndicatorValue(g_h1_slow_handle,1,h1_slow) ||
+      !ReadIndicatorValue(g_h4_fast_handle,1,h4_fast) ||
+      !ReadIndicatorValue(g_h4_fast_handle,2,h4_fast_prev) ||
+      !ReadIndicatorValue(g_h4_slow_handle,1,h4_slow))
+      return false;
+
+   const double h1_close=iClose(_Symbol,PERIOD_H1,1);
+   const double h4_close=iClose(_Symbol,PERIOD_H4,1);
+   if(h1_close<=0.0 || h4_close<=0.0)
+      return false;
+
+   const bool h1_bull=h1_close>h1_slow && h1_fast>h1_slow && (!InpUseEMASlope || h1_fast>h1_fast_prev);
+   const bool h1_bear=h1_close<h1_slow && h1_fast<h1_slow && (!InpUseEMASlope || h1_fast<h1_fast_prev);
+   const bool h4_bull=h4_close>h4_slow && h4_fast>h4_slow && (!InpUseEMASlope || h4_fast>h4_fast_prev);
+   const bool h4_bear=h4_close<h4_slow && h4_fast<h4_slow && (!InpUseEMASlope || h4_fast<h4_fast_prev);
+
+   if(InpBiasProfile==BIAS_PRODUCTION)
+      return direction>0 ? h1_bull && h4_bull : h1_bear && h4_bear;
+
+   return direction>0 ? (h1_bull || h4_bull) && !(h1_bear || h4_bear)
+                      : (h1_bear || h4_bear) && !(h1_bull || h4_bull);
+  }
+
 bool HasOurPosition(ulong &ticket)
   {
    ticket=0;
@@ -266,28 +325,28 @@ void ResetDay(const datetime bar_time)
    g_day_key=key;
    g_trades_today=0;
    g_day_start_equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   g_session_choch_found=false;
-   if(!InSession(bar_time))
+   if(!InSession(bar_time) && g_stage!=STAGE_LIVE)
      {
       CancelOurPendingOrders();
-      g_stage=STAGE_WAIT_CHOCH;
+      ResetPlan();
      }
   }
 
-void ResetPlan(const bool keep_choch)
+void ResetPlan()
   {
-   g_stage=keep_choch ? STAGE_WAIT_FVG : STAGE_WAIT_CHOCH;
-   if(!keep_choch)
-     {
-      g_direction=0;
-      g_choch_time=0;
-      g_bars_since_choch=0;
-      g_impulse_origin=0.0;
-      g_impulse_extreme=0.0;
-     }
+   g_stage=STAGE_WAIT_SWEEP;
+   g_direction=0;
+   g_sweep_time=0;
+   g_choch_time=0;
+   g_bars_since_sweep=0;
+   g_bars_since_choch=0;
+   g_sweep_extreme=0.0;
+   g_sweep_reference=0.0;
+   g_choch_level=0.0;
    g_planned_entry=0.0;
    g_planned_sl=0.0;
    g_planned_tp=0.0;
+   g_planned_be_trigger=0.0;
    g_planned_lots=0.0;
    g_be_moved=false;
   }
@@ -295,6 +354,8 @@ void ResetPlan(const bool keep_choch)
 bool PlaceSetupOrder(const int direction,const double entry,const double stop,const double atr,const datetime bar_time)
   {
    const double stop_distance=MathAbs(entry-stop);
+   if((direction>0 && stop>=entry) || (direction<0 && stop<=entry))
+      return false;
    if(stop_distance<atr*InpMinStopATR || stop_distance>atr*InpMaxStopATR)
       return false;
 
@@ -333,8 +394,8 @@ bool PlaceSetupOrder(const int direction,const double entry,const double stop,co
    g_planned_entry=NormalizePrice(entry);
    g_planned_sl=NormalizePrice(stop);
    g_planned_tp=NormalizePrice(take_profit);
+   g_planned_be_trigger=NormalizePrice(entry+direction*stop_distance*InpBreakEvenAtR);
    g_planned_lots=lots;
-   g_be_confirm_level=g_impulse_extreme;
    g_stage=STAGE_PENDING;
    PrintFormat("Setup placed: direction=%d entry=%.*f sl=%.*f tp=%.*f lots=%.2f",direction,_Digits,g_planned_entry,_Digits,g_planned_sl,_Digits,g_planned_tp,lots);
    return true;
@@ -355,8 +416,8 @@ void ManagePosition(const MqlRates &closed_bar)
 
    if(has_position && !g_be_moved && PositionSelectByTicket(ticket))
      {
-      const bool structure_confirmed=g_direction>0 ? closed_bar.close>g_be_confirm_level : closed_bar.close<g_be_confirm_level;
-      if(structure_confirmed)
+      const bool trigger_reached=g_direction>0 ? closed_bar.close>=g_planned_be_trigger : closed_bar.close<=g_planned_be_trigger;
+      if(trigger_reached)
         {
          const double open_price=PositionGetDouble(POSITION_PRICE_OPEN);
          const double current_tp=PositionGetDouble(POSITION_TP);
@@ -372,8 +433,7 @@ void ManagePosition(const MqlRates &closed_bar)
    if(!has_position && g_had_position)
      {
       g_had_position=false;
-      const bool can_reuse_choch=InSession(closed_bar.time) && g_trades_today<InpMaxTradesPerDay && g_bars_since_choch<=InpMaxChochToFvgBars;
-      ResetPlan(can_reuse_choch);
+      ResetPlan();
      }
   }
 
@@ -392,7 +452,7 @@ void ProcessClosedBar()
    if(g_stage==STAGE_PENDING && !NewEntriesAllowed(closed_bar.time))
      {
       CancelOurPendingOrders();
-      ResetPlan(false);
+      ResetPlan();
      }
 
    const int center=InpSwingLength+1;
@@ -400,40 +460,20 @@ void ProcessClosedBar()
      {
       g_swing_high=rates[center].high;
       g_swing_high_time=rates[center].time;
-      g_swing_high_crossed=false;
      }
    if(IsPivotLow(rates,center,InpSwingLength))
      {
       g_swing_low=rates[center].low;
       g_swing_low_time=rates[center].time;
-      g_swing_low_crossed=false;
-     }
-
-   const bool bull_break=g_swing_high>0.0 && !g_swing_high_crossed && closed_bar.close>g_swing_high && closed_bar.time>g_swing_high_time;
-   const bool bear_break=g_swing_low>0.0 && !g_swing_low_crossed && closed_bar.close<g_swing_low && closed_bar.time>g_swing_low_time;
-   const bool valid_bull_break=bull_break && !bear_break;
-   const bool valid_bear_break=bear_break && !bull_break;
-   const bool bull_choch=valid_bull_break && g_structure_bias<0;
-   const bool bear_choch=valid_bear_break && g_structure_bias>0;
-
-   if(valid_bull_break)
-     {
-      g_swing_high_crossed=true;
-      g_structure_bias=1;
-     }
-   if(valid_bear_break)
-     {
-      g_swing_low_crossed=true;
-      g_structure_bias=-1;
      }
 
    const bool session_now=InSession(closed_bar.time);
    if(!session_now)
      {
-      if(g_stage==STAGE_PENDING)
+      if(g_stage!=STAGE_LIVE && g_stage!=STAGE_WAIT_SWEEP)
         {
          CancelOurPendingOrders();
-         ResetPlan(false);
+         ResetPlan();
         }
       return;
      }
@@ -449,69 +489,88 @@ void ProcessClosedBar()
    if(atr<=0.0)
       return;
 
-   const double body=MathAbs(closed_bar.close-closed_bar.open);
-   const bool displacement_ok=InpMinDisplacementATR<=0.0 || body>=atr*InpMinDisplacementATR;
-   if(g_stage==STAGE_WAIT_CHOCH && !g_session_choch_found && NewEntriesAllowed(closed_bar.time))
+   if(g_stage==STAGE_WAIT_SWEEP && NewEntriesAllowed(closed_bar.time))
      {
-      if((bull_choch || bear_choch) && displacement_ok)
+      const bool pivots_ready=g_swing_high>0.0 && g_swing_low>0.0;
+      const double bull_depth=pivots_ready ? g_swing_low-closed_bar.low : 0.0;
+      const double bear_depth=pivots_ready ? closed_bar.high-g_swing_high : 0.0;
+      const bool raw_bull=pivots_ready && closed_bar.low<g_swing_low && closed_bar.close>g_swing_low &&
+                          closed_bar.time>g_swing_low_time && bull_depth<=atr*InpMaxSweepDepthATR;
+      const bool raw_bear=pivots_ready && closed_bar.high>g_swing_high && closed_bar.close<g_swing_high &&
+                          closed_bar.time>g_swing_high_time && bear_depth<=atr*InpMaxSweepDepthATR;
+      const bool bull_sweep=raw_bull && !raw_bear && BiasAllows(1);
+      const bool bear_sweep=raw_bear && !raw_bull && BiasAllows(-1);
+      if(bull_sweep || bear_sweep)
         {
-         g_direction=bull_choch ? 1 : -1;
-         g_session_choch_found=true;
+         g_direction=bull_sweep ? 1 : -1;
+         g_stage=STAGE_WAIT_CHOCH;
+         g_sweep_time=closed_bar.time;
+         g_bars_since_sweep=0;
+         g_sweep_extreme=bull_sweep ? closed_bar.low : closed_bar.high;
+         g_sweep_reference=bull_sweep ? g_swing_low : g_swing_high;
+         g_choch_level=bull_sweep ? g_swing_high : g_swing_low;
+         PrintFormat("Liquidity sweep detected: direction=%d sweep=%.*f CHoCH=%.*f",g_direction,_Digits,g_sweep_extreme,_Digits,g_choch_level);
+        }
+     }
+
+   if(g_stage==STAGE_WAIT_CHOCH)
+     {
+      g_bars_since_sweep=(int)((closed_bar.time-g_sweep_time)/PeriodSeconds(PERIOD_M5));
+      if(g_direction>0)
+         g_sweep_extreme=MathMin(g_sweep_extreme,closed_bar.low);
+      else
+         g_sweep_extreme=MathMax(g_sweep_extreme,closed_bar.high);
+
+      const bool depth_invalid=g_direction>0 ? g_sweep_reference-g_sweep_extreme>atr*InpMaxSweepDepthATR
+                                             : g_sweep_extreme-g_sweep_reference>atr*InpMaxSweepDepthATR;
+      const bool reclaim_failed=g_direction>0 ? closed_bar.close<g_sweep_reference : closed_bar.close>g_sweep_reference;
+      if(depth_invalid || reclaim_failed || g_bars_since_sweep>InpMaxSweepToChochBars || !NewEntriesAllowed(closed_bar.time))
+        {
+         ResetPlan();
+         return;
+        }
+
+      const double body=MathAbs(closed_bar.close-closed_bar.open);
+      const bool displacement_ok=InpMinDisplacementATR<=0.0 || body>=atr*InpMinDisplacementATR;
+      const bool choch=g_direction>0 ? closed_bar.time>g_sweep_time && closed_bar.close>g_choch_level && displacement_ok
+                                     : closed_bar.time>g_sweep_time && closed_bar.close<g_choch_level && displacement_ok;
+      if(choch)
+        {
          g_stage=STAGE_WAIT_FVG;
          g_choch_time=closed_bar.time;
          g_bars_since_choch=0;
-         g_impulse_origin=bull_choch ? g_swing_low : g_swing_high;
-         g_impulse_extreme=bull_choch ? closed_bar.high : closed_bar.low;
-         PrintFormat("Session CHoCH detected: direction=%d",g_direction);
+         PrintFormat("CHoCH confirmed after sweep: direction=%d",g_direction);
         }
      }
 
    if(g_stage==STAGE_WAIT_FVG)
      {
-      g_bars_since_choch++;
-      if(g_direction>0)
-         g_impulse_extreme=MathMax(g_impulse_extreme,closed_bar.high);
-      else
-         g_impulse_extreme=MathMin(g_impulse_extreme,closed_bar.low);
-
+      g_bars_since_choch=(int)((closed_bar.time-g_choch_time)/PeriodSeconds(PERIOD_M5));
       if(g_bars_since_choch>InpMaxChochToFvgBars || !NewEntriesAllowed(closed_bar.time))
         {
-         ResetPlan(false);
+         ResetPlan();
          return;
         }
 
-      const double displacement_atr=GetATR(2);
-      const double middle_body=MathAbs(rates[2].close-rates[2].open);
-      const bool bull_displacement=rates[2].close>rates[2].open && rates[2].close>rates[3].high && (InpMinDisplacementATR<=0.0 || middle_body>=displacement_atr*InpMinDisplacementATR);
-      const bool bear_displacement=rates[2].close<rates[2].open && rates[2].close<rates[3].low && (InpMinDisplacementATR<=0.0 || middle_body>=displacement_atr*InpMinDisplacementATR);
-      const bool bull_fvg=g_direction>0 && rates[1].low>rates[3].high && rates[1].low-rates[3].high>=atr*InpMinFvgATR && bull_displacement;
-      const bool bear_fvg=g_direction<0 && rates[1].high<rates[3].low && rates[3].low-rates[1].high>=atr*InpMinFvgATR && bear_displacement;
+      const bool later_bar=closed_bar.time>g_choch_time;
+      const bool bull_fvg=g_direction>0 && later_bar && rates[1].low>rates[3].high && rates[1].low-rates[3].high>=atr*InpMinFvgATR;
+      const bool bear_fvg=g_direction<0 && later_bar && rates[1].high<rates[3].low && rates[3].low-rates[1].high>=atr*InpMinFvgATR;
       if(!bull_fvg && !bear_fvg)
          return;
 
       const double fvg_low=bull_fvg ? rates[3].high : rates[1].high;
       const double fvg_high=bull_fvg ? rates[1].low : rates[3].low;
       const double entry=(fvg_low+fvg_high)/2.0;
-      const double impulse_range=MathAbs(g_impulse_extreme-g_impulse_origin);
-      if(impulse_range<=0.0)
-         return;
-
-      const double fib_a=g_direction>0 ? g_impulse_extreme-impulse_range*InpFibZoneStart : g_impulse_extreme+impulse_range*InpFibZoneStart;
-      const double fib_b=g_direction>0 ? g_impulse_extreme-impulse_range*InpFibZoneEnd : g_impulse_extreme+impulse_range*InpFibZoneEnd;
-      const double fib_low=MathMin(fib_a,fib_b);
-      const double fib_high=MathMax(fib_a,fib_b);
-      if(entry<fib_low || entry>fib_high)
-         return;
-
-      const double stop=g_direction>0 ? MathMin(rates[1].low,rates[2].low)-atr*InpSLBufferATR : MathMax(rates[1].high,rates[2].high)+atr*InpSLBufferATR;
-      PlaceSetupOrder(g_direction,entry,stop,atr,closed_bar.time);
+      const double stop=g_direction>0 ? g_sweep_extreme-atr*InpSLBufferATR : g_sweep_extreme+atr*InpSLBufferATR;
+      if(!PlaceSetupOrder(g_direction,entry,stop,atr,closed_bar.time))
+         ResetPlan();
      }
 
    if(g_stage==STAGE_PENDING && !HasOurPendingOrder())
      {
       ulong position_ticket=0;
       if(!HasOurPosition(position_ticket))
-         ResetPlan(g_bars_since_choch<=InpMaxChochToFvgBars);
+         ResetPlan();
      }
   }
 
@@ -522,11 +581,18 @@ int OnInit()
       Print("Attach the EA to an M5 chart or disable InpRequireM5.");
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(InpSwingLength<1 || InpFibZoneStart>=InpFibZoneEnd || InpRiskPercent<=0.0 || InpLotMultiplier<=0.0 || InpRewardRisk<=0.0)
+   if(InpSwingLength<1 || InpHTFFastEMA<1 || InpHTFSlowEMA<=InpHTFFastEMA ||
+      (InpSizingMode==SIZING_RISK_PERCENT && InpRiskPercent<=0.0) || InpLotMultiplier<=0.0 ||
+      InpRewardRisk<=0.0 || InpBreakEvenAtR<=0.0 || InpMinStopATR>InpMaxStopATR)
       return INIT_PARAMETERS_INCORRECT;
 
    g_atr_handle=iATR(_Symbol,PERIOD_M5,InpATRPeriod);
-   if(g_atr_handle==INVALID_HANDLE)
+   g_h1_fast_handle=iMA(_Symbol,PERIOD_H1,InpHTFFastEMA,0,MODE_EMA,PRICE_CLOSE);
+   g_h1_slow_handle=iMA(_Symbol,PERIOD_H1,InpHTFSlowEMA,0,MODE_EMA,PRICE_CLOSE);
+   g_h4_fast_handle=iMA(_Symbol,PERIOD_H4,InpHTFFastEMA,0,MODE_EMA,PRICE_CLOSE);
+   g_h4_slow_handle=iMA(_Symbol,PERIOD_H4,InpHTFSlowEMA,0,MODE_EMA,PRICE_CLOSE);
+   if(g_atr_handle==INVALID_HANDLE || g_h1_fast_handle==INVALID_HANDLE || g_h1_slow_handle==INVALID_HANDLE ||
+      g_h4_fast_handle==INVALID_HANDLE || g_h4_slow_handle==INVALID_HANDLE)
       return INIT_FAILED;
 
    trade.SetExpertMagicNumber(InpMagicNumber);
@@ -540,7 +606,47 @@ void OnDeinit(const int reason)
   {
    if(g_atr_handle!=INVALID_HANDLE)
       IndicatorRelease(g_atr_handle);
+   if(g_h1_fast_handle!=INVALID_HANDLE)
+      IndicatorRelease(g_h1_fast_handle);
+   if(g_h1_slow_handle!=INVALID_HANDLE)
+      IndicatorRelease(g_h1_slow_handle);
+   if(g_h4_fast_handle!=INVALID_HANDLE)
+      IndicatorRelease(g_h4_fast_handle);
+   if(g_h4_slow_handle!=INVALID_HANDLE)
+      IndicatorRelease(g_h4_slow_handle);
    Comment("");
+  }
+
+void OnTradeTransaction(const MqlTradeTransaction &transaction,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+  {
+   if(transaction.type!=TRADE_TRANSACTION_DEAL_ADD || transaction.deal==0 || !HistoryDealSelect(transaction.deal))
+      return;
+   if(HistoryDealGetString(transaction.deal,DEAL_SYMBOL)!=_Symbol ||
+      HistoryDealGetInteger(transaction.deal,DEAL_MAGIC)!=InpMagicNumber)
+      return;
+
+   const ENUM_DEAL_ENTRY entry_type=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(transaction.deal,DEAL_ENTRY);
+   if(entry_type==DEAL_ENTRY_IN || entry_type==DEAL_ENTRY_INOUT)
+     {
+      if(!g_had_position)
+         g_trades_today++;
+      g_had_position=true;
+      g_stage=STAGE_LIVE;
+      CancelOurPendingOrders();
+      return;
+     }
+
+   if(entry_type==DEAL_ENTRY_OUT || entry_type==DEAL_ENTRY_OUT_BY)
+     {
+      ulong remaining_ticket=0;
+      if(!HasOurPosition(remaining_ticket))
+        {
+         g_had_position=false;
+         ResetPlan();
+        }
+     }
   }
 
 void OnTick()
@@ -552,6 +658,6 @@ void OnTick()
    g_last_bar_time=current_bar;
    ProcessClosedBar();
 
-   Comment(StringFormat("EKV NY CHoCH FVG\nStage: %d  Bias: %d  Trades today: %d\nPlanned lots: %.2f  Entry: %.*f\nDay start equity: %.2f",
-                        (int)g_stage,g_structure_bias,g_trades_today,g_planned_lots,_Digits,g_planned_entry,g_day_start_equity));
+   Comment(StringFormat("EKV NY Sweep / CHoCH / FVG v1.10\nStage: %d  Direction: %d  Trades today: %d\nPlanned lots: %.2f  Entry: %.*f\nDay start equity: %.2f",
+                        (int)g_stage,g_direction,g_trades_today,g_planned_lots,_Digits,g_planned_entry,g_day_start_equity));
   }

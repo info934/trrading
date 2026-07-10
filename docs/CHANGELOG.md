@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-10 - MT5 EA v1.10
+
+- Replaced the unfiltered session CHoCH entry with the intended sequential
+  liquidity sweep, later CHoCH, later FVG and later limit-fill lifecycle.
+- Added confirmed H1/H4 EMA direction filtering; strict H1+H4 alignment is the
+  default after outperforming the balanced profile in the reference regression.
+- Moved structural invalidation behind the sweep extreme, changed the default
+  target to 3R and break-even trigger to a confirmed 1.5R M5 close.
+- Added deal-transaction accounting so an intrabar round trip cannot be missed.
+- Verified compilation with zero errors and zero warnings and tested on FTMO
+  real ticks; the reference balance improved from USD 97,878.65 to USD 100,525.11.
+
 Všechny významné změny projektu budou dokumentovány v tomto souboru.
 
 ## Unreleased
