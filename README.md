@@ -1,8 +1,8 @@
 # EKV Gold Trader
 
 Auditovatelný obchodní systém pro XAU/USD CFD. Signály jsou plánované pro
-TradingView (Pine Script v6), ruční exekuce pro MetaTrader 5 a pozdější nezávislá
-validace v Pythonu.
+TradingView (Pine Script v6), automatizovaná testovací exekuce v MetaTrader 5
+a pozdější nezávislá validace v Pythonu.
 
 > Projekt neslibuje ziskovost a není finančním doporučením. Prioritou je správná
 > implementace, řízení rizika, reprodukovatelnost a ochrana proti repaintingu,
@@ -18,6 +18,7 @@ v1.3; v1.0 a v1.2 zůstávají jako auditovatelné historické verze.
 
 ```text
 pine/             Pine strategie a indikátor
+mql5/             MetaTrader 5 Expert Advisor zdroje
 python/           pozdější backtestovací a validační vrstva
 configs/          verzované příklady konfigurace bez tajných údajů
 tests/            testovací checklisty a automatické testy
@@ -58,3 +59,10 @@ skriptu je nutné vytvořit alert v TradingView znovu.
 
 Návod v1.3 je v `docs/INDICATOR_V1_3.md`; ověřovací checklist je v
 `tests/PINE_INDICATOR_V1_3_CHECKLIST.md`.
+
+## MetaTrader 5 EA
+
+`mql5/Experts/EKV_NY_CHoCH_FVG_EA.mq5` implementuje NY CHoCH, displacement
+FVG, Fibonacci zónu 50-61,8 %, midpoint limit, broker-aware lot sizing, SL/4R,
+strukturální break-even, spread filtr a denní ztrátový limit. Přesný instalační
+a testovací postup je v `docs/MT5_EA_BACKTEST.md`.

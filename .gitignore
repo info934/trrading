@@ -55,6 +55,10 @@ dist/
 *.tks
 *.bi5
 
+# Compiled MetaTrader artifacts (rebuild from committed MQL5 source)
+*.ex5
+*.ex4
+
 # Generated reports, optimization studies, and model artifacts
 /reports/**
 !/reports/README.md

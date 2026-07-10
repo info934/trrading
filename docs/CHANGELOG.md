@@ -6,6 +6,9 @@ Všechny významné změny projektu budou dokumentovány v tomto souboru.
 
 ### Added
 
+- Added an MT5 Expert Advisor for the NY CHoCH/FVG model with broker-aware
+  `OrderCalcProfit` risk sizing, limit orders, structural break-even, spread
+  protection, daily loss cap and real-tick backtest instructions.
 - Strategy backtest now follows the supplied NY-open model: first confirmed
   CHoCH, FVG midpoint inside the 50%-61.8% retracement zone, limit entry,
   FVG-candle stop, 4R target, structural-close break-even, and configurable
