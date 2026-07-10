@@ -48,6 +48,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check_workspace_size.ps1
   bez Strategy Testeru a Bar Magnifieru; obsahuje úrovně, dashboard a alerty.
 - `pine/EKV_Gold_Trader_indicator_v1_3.pine` — doporučený NY SMC indikátor s profily
   Production/Balanced experimental/Structure debug a alerty `EKV|v1.3`.
+- `pine/EKV_Gold_Trader_strategy_v1_0.pine` — samostatná NY SMC výzkumná strategie
+  pro TradingView Strategy Tester; nenahrazuje indikátor ani MT5 exekuci.
 
 Indikátor nevytváří skutečné objednávky, nepoužívá Strategy Tester ani Bar
 Magnifier a jeho price-touch události nejsou potvrzením fillu v MT5. Před ručním
