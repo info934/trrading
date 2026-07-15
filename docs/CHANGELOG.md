@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-10 - MT5 EA v1.20 challenge profile
+
+- Changed the target to 1:2 and added an Asia + New York multi-session model.
+- Added the USD 100k challenge guardrails: USD 5k profit target, USD 5k maximum
+  daily loss, USD 10k maximum loss and at least two trade days.
+- Added a 14-day target classification without forcing the EA to stop after day
+  14; the journal reports `PASS_14D`, `PASS_LATE` or `FAIL`.
+- Added persistent chart drawings for sweep, CHoCH, FVG, Entry/SL/TP, fills and
+  exits, plus challenge drawdown and weekly diagnostics.
+- Validated four consecutive 14-day real-tick windows: three passed within the
+  target duration and one remained profitable but missed the USD 5k target.
+- Extended validation across separate 2024, 2025 and 2026 periods invalidated
+  the profile: every period breached the USD 10k maximum-loss boundary. The EA
+  is therefore not approved for automated challenge deployment.
+
 ## 2026-07-10 - MT5 EA v1.10
 
 - Replaced the unfiltered session CHoCH entry with the intended sequential

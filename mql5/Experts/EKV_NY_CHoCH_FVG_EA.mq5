@@ -1,7 +1,7 @@
 #property copyright "EKV TradeGold"
-#property version   "1.10"
+#property version   "1.20"
 #property strict
-#property description "NY liquidity sweep + CHoCH + FVG retracement EA"
+#property description "Asia/NY liquidity sweep + CHoCH + FVG challenge EA"
 
 #include <Trade/Trade.mqh>
 
@@ -24,48 +24,68 @@ enum ENUM_BIAS_PROFILE
   {
    BIAS_PRODUCTION = 0,
    BIAS_BALANCED   = 1,
-   BIAS_DISABLED   = 2
+   BIAS_H1_ONLY    = 2,
+   BIAS_DISABLED   = 3
   };
 
 input group "01 - Environment"
 input long                 InpMagicNumber          = 26071001;
 input bool                 InpRequireM5            = true;
+input bool                 InpUseAsiaSession       = true;
+input int                  InpAsiaStartHour        = 1;        // broker server time
+input int                  InpAsiaStartMinute      = 0;
+input int                  InpAsiaEndHour          = 4;
+input int                  InpAsiaEndMinute        = 0;
+input bool                 InpUseNewYorkSession    = true;
 input int                  InpSessionStartHour     = 16;       // broker server time
 input int                  InpSessionStartMinute   = 30;
-input int                  InpSessionEndHour       = 18;       // broker server time
+input int                  InpSessionEndHour       = 19;       // broker server time
 input int                  InpSessionEndMinute     = 30;
 input int                  InpMaxTradesPerDay      = 2;
-input double               InpMaxDailyLossPct      = 1.0;
+input double               InpMaxDailyLossPct      = 5.0;
 input int                  InpMaxSpreadPoints      = 80;
 
-input group "02 - Structure and FVG"
-input int                  InpSwingLength          = 3;
-input int                  InpMaxSweepToChochBars  = 12;
-input int                  InpMaxChochToFvgBars    = 8;
-input int                  InpPendingExpiryBars    = 12;
-input int                  InpATRPeriod            = 14;
-input double               InpMaxSweepDepthATR     = 1.00;
-input double               InpMinDisplacementATR   = 0.60;
-input double               InpMinFvgATR            = 0.10;
-input double               InpSLBufferATR          = 0.10;
-input double               InpMinStopATR           = 0.40;
-input double               InpMaxStopATR           = 2.50;
+input group "02 - Challenge limits"
+input bool                 InpUseChallengeLimits   = true;
+input double               InpChallengeProfitTarget = 5000.0;
+input double               InpChallengeMaxDailyLoss = 5000.0;
+input double               InpChallengeMaxLoss     = 10000.0;
+input int                  InpChallengeMinTradeDays = 2;
+input int                  InpChallengeTargetDays  = 14;
+input bool                 InpStopAfterTarget      = true;
 
-input group "03 - Higher timeframe bias"
-input ENUM_BIAS_PROFILE    InpBiasProfile          = BIAS_PRODUCTION;
+input group "03 - Structure and FVG"
+input int                  InpSwingLength          = 2;
+input int                  InpMaxSweepToChochBars  = 18;
+input int                  InpMaxChochToFvgBars    = 12;
+input int                  InpPendingExpiryBars    = 18;
+input int                  InpATRPeriod            = 14;
+input double               InpMaxSweepDepthATR     = 1.50;
+input double               InpMinDisplacementATR   = 0.35;
+input double               InpMinFvgATR            = 0.03;
+input double               InpSLBufferATR          = 0.10;
+input double               InpMinStopATR           = 0.25;
+input double               InpMaxStopATR           = 4.00;
+
+input group "04 - Higher timeframe bias"
+input ENUM_BIAS_PROFILE    InpBiasProfile          = BIAS_DISABLED;
 input int                  InpHTFFastEMA           = 50;
 input int                  InpHTFSlowEMA           = 200;
 input bool                 InpUseEMASlope          = true;
 
-input group "04 - Risk and exits"
+input group "05 - Risk and exits"
 input ENUM_POSITION_SIZING InpSizingMode           = SIZING_RISK_PERCENT;
-input double               InpRiskPercent          = 0.50;
+input double               InpRiskPercent          = 2.00;
 input double               InpFixedLots            = 0.10;
 input double               InpLotMultiplier        = 1.00;
 input double               InpMaximumLots          = 10.0;
-input double               InpRewardRisk           = 3.0;
-input double               InpBreakEvenAtR          = 1.50;
+input double               InpRewardRisk           = 2.0;
+input double               InpBreakEvenAtR          = 1.00;
 input int                  InpBreakEvenOffsetPoints = 10;
+
+input group "06 - Chart drawings"
+input bool                 InpDrawOnChart           = true;
+input bool                 InpKeepHistoricalObjects = true;
 
 CTrade trade;
 int g_atr_handle = INVALID_HANDLE;
@@ -100,6 +120,77 @@ double g_planned_lots = 0.0;
 int g_day_key = -1;
 int g_trades_today = 0;
 double g_day_start_equity = 0.0;
+double g_initial_balance = 0.0;
+double g_min_equity = 0.0;
+double g_max_daily_loss_seen = 0.0;
+int g_metric_day_key = -1;
+int g_last_trade_day_key = -1;
+int g_trade_days = 0;
+int g_week_key = -1;
+double g_week_start_balance = 0.0;
+bool g_week_had_trade = false;
+int g_traded_weeks = 0;
+int g_profitable_weeks = 0;
+int g_losing_weeks = 0;
+datetime g_target_reached_time = 0;
+datetime g_challenge_start_time = 0;
+
+string ObjectPrefix()
+  {
+   return StringFormat("EKV_%I64d_",InpMagicNumber);
+  }
+
+string ObjectId(const string tag,const datetime time)
+  {
+   return ObjectPrefix()+tag+"_"+IntegerToString((long)time);
+  }
+
+void DrawEvent(const string tag,const datetime time,const double price,const color line_color)
+  {
+   if(!InpDrawOnChart)
+      return;
+   const string name=ObjectId(tag,time);
+   if(ObjectFind(0,name)>=0 || !ObjectCreate(0,name,OBJ_TEXT,0,time,price))
+      return;
+   ObjectSetString(0,name,OBJPROP_TEXT,tag);
+   ObjectSetString(0,name,OBJPROP_FONT,"Arial Bold");
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,8);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,line_color);
+   ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_CENTER);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+  }
+
+void DrawLevel(const string tag,const datetime start_time,const datetime end_time,const double price,const color line_color,const ENUM_LINE_STYLE style)
+  {
+   if(!InpDrawOnChart)
+      return;
+   const string name=ObjectId(tag,start_time);
+   if(!ObjectCreate(0,name,OBJ_TREND,0,start_time,price,end_time,price))
+      return;
+   ObjectSetInteger(0,name,OBJPROP_COLOR,line_color);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,style);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+   ObjectSetInteger(0,name,OBJPROP_RAY_RIGHT,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,tag+" "+DoubleToString(price,_Digits));
+  }
+
+void DrawPlan(const datetime fvg_start,const datetime plan_time,const datetime expiry,const double fvg_low,const double fvg_high)
+  {
+   if(!InpDrawOnChart)
+      return;
+   const string box_name=ObjectId("FVG",plan_time);
+   if(ObjectCreate(0,box_name,OBJ_RECTANGLE,0,fvg_start,fvg_high,expiry,fvg_low))
+     {
+      ObjectSetInteger(0,box_name,OBJPROP_COLOR,g_direction>0 ? clrTeal : clrOrange);
+      ObjectSetInteger(0,box_name,OBJPROP_FILL,true);
+      ObjectSetInteger(0,box_name,OBJPROP_BACK,true);
+      ObjectSetInteger(0,box_name,OBJPROP_SELECTABLE,false);
+     }
+   DrawLevel("ENTRY",plan_time,expiry,g_planned_entry,clrGold,STYLE_SOLID);
+   DrawLevel("SL",plan_time,expiry,g_planned_sl,clrRed,STYLE_DASH);
+   DrawLevel("TP",plan_time,expiry,g_planned_tp,clrLimeGreen,STYLE_DASH);
+  }
 
 int MinuteOfDay(const datetime value)
   {
@@ -115,12 +206,69 @@ int DayKey(const datetime value)
    return parts.year*10000+parts.mon*100+parts.day;
   }
 
+int WeekKey(const datetime value)
+  {
+   MqlDateTime parts;
+   TimeToStruct(value,parts);
+   const int days_from_monday=(parts.day_of_week+6)%7;
+   return DayKey(value-days_from_monday*86400);
+  }
+
+void CloseWeekMetrics(const double current_balance)
+  {
+   if(!g_week_had_trade)
+      return;
+   g_traded_weeks++;
+   const double result=current_balance-g_week_start_balance;
+   if(result>0.01)
+      g_profitable_weeks++;
+   else if(result<-0.01)
+      g_losing_weeks++;
+  }
+
+void UpdateChallengeMetrics(const datetime now)
+  {
+   const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   const double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   g_min_equity=MathMin(g_min_equity,equity);
+
+   const int current_day=DayKey(now);
+   if(current_day!=g_metric_day_key)
+     {
+      g_metric_day_key=current_day;
+      g_day_start_equity=equity;
+     }
+   g_max_daily_loss_seen=MathMax(g_max_daily_loss_seen,g_day_start_equity-equity);
+
+   const int current_week=WeekKey(now);
+   if(current_week!=g_week_key)
+     {
+      if(g_week_key!=-1)
+         CloseWeekMetrics(balance);
+      g_week_key=current_week;
+      g_week_start_balance=balance;
+      g_week_had_trade=false;
+     }
+
+   if(g_target_reached_time==0 && g_trade_days>=InpChallengeMinTradeDays && balance-g_initial_balance>=InpChallengeProfitTarget)
+      g_target_reached_time=now;
+  }
+
+bool InMinuteWindow(const int minute_of_day,const int start_minute,const int end_minute)
+  {
+   if(start_minute==end_minute)
+      return false;
+   if(start_minute<end_minute)
+      return minute_of_day>=start_minute && minute_of_day<end_minute;
+   return minute_of_day>=start_minute || minute_of_day<end_minute;
+  }
+
 bool InSession(const datetime value)
   {
    const int now_minute=MinuteOfDay(value);
-   const int start_minute=InpSessionStartHour*60+InpSessionStartMinute;
-   const int end_minute=InpSessionEndHour*60+InpSessionEndMinute;
-   return now_minute>=start_minute && now_minute<end_minute;
+   const bool asia=InpUseAsiaSession && InMinuteWindow(now_minute,InpAsiaStartHour*60+InpAsiaStartMinute,InpAsiaEndHour*60+InpAsiaEndMinute);
+   const bool new_york=InpUseNewYorkSession && InMinuteWindow(now_minute,InpSessionStartHour*60+InpSessionStartMinute,InpSessionEndHour*60+InpSessionEndMinute);
+   return asia || new_york;
   }
 
 bool NewEntriesAllowed(const datetime value)
@@ -133,7 +281,18 @@ bool NewEntriesAllowed(const datetime value)
 
    const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    const double drawdown_pct=(g_day_start_equity-equity)/g_day_start_equity*100.0;
-   return drawdown_pct<InpMaxDailyLossPct;
+   if(drawdown_pct>=InpMaxDailyLossPct)
+      return false;
+
+   if(InpUseChallengeLimits)
+     {
+      const double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+      if(g_day_start_equity-equity>=InpChallengeMaxDailyLoss || g_initial_balance-equity>=InpChallengeMaxLoss)
+         return false;
+      if(InpStopAfterTarget && g_trade_days>=InpChallengeMinTradeDays && balance-g_initial_balance>=InpChallengeProfitTarget)
+         return false;
+     }
+   return true;
   }
 
 double NormalizePrice(const double price)
@@ -234,6 +393,9 @@ bool BiasAllows(const int direction)
 
    if(InpBiasProfile==BIAS_PRODUCTION)
       return direction>0 ? h1_bull && h4_bull : h1_bear && h4_bear;
+
+   if(InpBiasProfile==BIAS_H1_ONLY)
+      return direction>0 ? h1_bull : h1_bear;
 
    return direction>0 ? (h1_bull || h4_bull) && !(h1_bear || h4_bear)
                       : (h1_bear || h4_bear) && !(h1_bull || h4_bull);
@@ -509,6 +671,7 @@ void ProcessClosedBar()
          g_sweep_extreme=bull_sweep ? closed_bar.low : closed_bar.high;
          g_sweep_reference=bull_sweep ? g_swing_low : g_swing_high;
          g_choch_level=bull_sweep ? g_swing_high : g_swing_low;
+         DrawEvent(bull_sweep ? "SWEEP LONG" : "SWEEP SHORT",closed_bar.time,g_sweep_extreme,bull_sweep ? clrDeepSkyBlue : clrOrangeRed);
          PrintFormat("Liquidity sweep detected: direction=%d sweep=%.*f CHoCH=%.*f",g_direction,_Digits,g_sweep_extreme,_Digits,g_choch_level);
         }
      }
@@ -539,6 +702,7 @@ void ProcessClosedBar()
          g_stage=STAGE_WAIT_FVG;
          g_choch_time=closed_bar.time;
          g_bars_since_choch=0;
+         DrawEvent(g_direction>0 ? "CHoCH LONG" : "CHoCH SHORT",closed_bar.time,closed_bar.close,g_direction>0 ? clrLimeGreen : clrTomato);
          PrintFormat("CHoCH confirmed after sweep: direction=%d",g_direction);
         }
      }
@@ -562,7 +726,12 @@ void ProcessClosedBar()
       const double fvg_high=bull_fvg ? rates[1].low : rates[3].low;
       const double entry=(fvg_low+fvg_high)/2.0;
       const double stop=g_direction>0 ? g_sweep_extreme-atr*InpSLBufferATR : g_sweep_extreme+atr*InpSLBufferATR;
-      if(!PlaceSetupOrder(g_direction,entry,stop,atr,closed_bar.time))
+      if(PlaceSetupOrder(g_direction,entry,stop,atr,closed_bar.time))
+        {
+         const datetime expiry=closed_bar.time+InpPendingExpiryBars*PeriodSeconds(PERIOD_M5);
+         DrawPlan(rates[3].time,closed_bar.time,expiry,fvg_low,fvg_high);
+        }
+      else
          ResetPlan();
      }
 
@@ -581,9 +750,10 @@ int OnInit()
       Print("Attach the EA to an M5 chart or disable InpRequireM5.");
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(InpSwingLength<1 || InpHTFFastEMA<1 || InpHTFSlowEMA<=InpHTFFastEMA ||
+   if((!InpUseAsiaSession && !InpUseNewYorkSession) || InpSwingLength<1 || InpHTFFastEMA<1 || InpHTFSlowEMA<=InpHTFFastEMA ||
       (InpSizingMode==SIZING_RISK_PERCENT && InpRiskPercent<=0.0) || InpLotMultiplier<=0.0 ||
-      InpRewardRisk<=0.0 || InpBreakEvenAtR<=0.0 || InpMinStopATR>InpMaxStopATR)
+      InpRewardRisk<=0.0 || InpBreakEvenAtR<=0.0 || InpMinStopATR>InpMaxStopATR ||
+      (InpUseChallengeLimits && (InpChallengeProfitTarget<=0.0 || InpChallengeMaxDailyLoss<=0.0 || InpChallengeMaxLoss<=0.0 || InpChallengeMinTradeDays<1 || InpChallengeTargetDays<1)))
       return INIT_PARAMETERS_INCORRECT;
 
    g_atr_handle=iATR(_Symbol,PERIOD_M5,InpATRPeriod);
@@ -598,12 +768,27 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetAsyncMode(false);
+   g_initial_balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   g_challenge_start_time=TimeCurrent();
    g_day_start_equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   g_min_equity=g_day_start_equity;
+   UpdateChallengeMetrics(TimeCurrent());
    return INIT_SUCCEEDED;
   }
 
 void OnDeinit(const int reason)
   {
+   CloseWeekMetrics(AccountInfoDouble(ACCOUNT_BALANCE));
+   const bool limits_ok=g_trade_days>=InpChallengeMinTradeDays && g_max_daily_loss_seen<InpChallengeMaxDailyLoss &&
+                        MathMax(0.0,g_initial_balance-g_min_equity)<InpChallengeMaxLoss;
+   const bool target_reached=g_target_reached_time>0;
+   const bool target_in_time=target_reached && g_target_reached_time-g_challenge_start_time<=InpChallengeTargetDays*86400;
+   const string challenge_result=!limits_ok || !target_reached ? "FAIL" : target_in_time ? "PASS_14D" : "PASS_LATE";
+   PrintFormat("CHALLENGE SUMMARY: result=%s start=%.2f final=%.2f net=%.2f trade_days=%d traded_weeks=%d profitable_weeks=%d losing_weeks=%d max_daily_loss=%.2f max_loss_from_start=%.2f target_reached=%s target_days=%d",
+               challenge_result,
+               g_initial_balance,AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_BALANCE)-g_initial_balance,
+               g_trade_days,g_traded_weeks,g_profitable_weeks,g_losing_weeks,g_max_daily_loss_seen,
+               MathMax(0.0,g_initial_balance-g_min_equity),g_target_reached_time>0 ? TimeToString(g_target_reached_time,TIME_DATE|TIME_MINUTES) : "NO",InpChallengeTargetDays);
    if(g_atr_handle!=INVALID_HANDLE)
       IndicatorRelease(g_atr_handle);
    if(g_h1_fast_handle!=INVALID_HANDLE)
@@ -614,6 +799,8 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_h4_fast_handle);
    if(g_h4_slow_handle!=INVALID_HANDLE)
       IndicatorRelease(g_h4_slow_handle);
+   if(!InpKeepHistoricalObjects)
+      ObjectsDeleteAll(0,ObjectPrefix());
    Comment("");
   }
 
@@ -628,8 +815,18 @@ void OnTradeTransaction(const MqlTradeTransaction &transaction,
       return;
 
    const ENUM_DEAL_ENTRY entry_type=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(transaction.deal,DEAL_ENTRY);
+   const datetime deal_time=(datetime)HistoryDealGetInteger(transaction.deal,DEAL_TIME);
+   const double deal_price=HistoryDealGetDouble(transaction.deal,DEAL_PRICE);
    if(entry_type==DEAL_ENTRY_IN || entry_type==DEAL_ENTRY_INOUT)
      {
+      DrawEvent(g_direction>0 ? "FILL LONG" : "FILL SHORT",deal_time,deal_price,clrGold);
+      const int trade_day=DayKey(deal_time);
+      if(trade_day!=g_last_trade_day_key)
+        {
+         g_last_trade_day_key=trade_day;
+         g_trade_days++;
+        }
+      g_week_had_trade=true;
       if(!g_had_position)
          g_trades_today++;
       g_had_position=true;
@@ -640,6 +837,9 @@ void OnTradeTransaction(const MqlTradeTransaction &transaction,
 
    if(entry_type==DEAL_ENTRY_OUT || entry_type==DEAL_ENTRY_OUT_BY)
      {
+      const ENUM_DEAL_REASON reason=(ENUM_DEAL_REASON)HistoryDealGetInteger(transaction.deal,DEAL_REASON);
+      const string exit_tag=reason==DEAL_REASON_TP ? "EXIT TP" : reason==DEAL_REASON_SL ? "EXIT SL/BE" : "EXIT";
+      DrawEvent(exit_tag,deal_time,deal_price,reason==DEAL_REASON_TP ? clrLimeGreen : clrRed);
       ulong remaining_ticket=0;
       if(!HasOurPosition(remaining_ticket))
         {
@@ -651,6 +851,7 @@ void OnTradeTransaction(const MqlTradeTransaction &transaction,
 
 void OnTick()
   {
+   UpdateChallengeMetrics(TimeCurrent());
    const datetime current_bar=iTime(_Symbol,PERIOD_M5,0);
    if(current_bar==0 || current_bar==g_last_bar_time)
       return;
@@ -658,6 +859,6 @@ void OnTick()
    g_last_bar_time=current_bar;
    ProcessClosedBar();
 
-   Comment(StringFormat("EKV NY Sweep / CHoCH / FVG v1.10\nStage: %d  Direction: %d  Trades today: %d\nPlanned lots: %.2f  Entry: %.*f\nDay start equity: %.2f",
+   Comment(StringFormat("EKV Asia/NY Sweep / CHoCH / FVG v1.20\nStage: %d  Direction: %d  Trades today: %d\nPlanned lots: %.2f  Entry: %.*f\nDay start equity: %.2f",
                         (int)g_stage,g_direction,g_trades_today,g_planned_lots,_Digits,g_planned_entry,g_day_start_equity));
   }

@@ -1,6 +1,6 @@
 # MT5 EA backtest
 
-Expert Advisor: `mql5/Experts/EKV_NY_CHoCH_FVG_EA.mq5` (v1.10)
+Expert Advisor: `mql5/Experts/EKV_NY_CHoCH_FVG_EA.mq5` (v1.20)
 
 The default model is now the strict lifecycle `liquidity sweep -> later CHoCH
 -> later FVG -> limit retracement`. Direction requires confirmed H1 and H4
@@ -56,6 +56,27 @@ FTMO-Demo XAUUSD M5, real ticks, 2026-01-01 through 2026-07-09, USD 100,000,
 - v1.10 production H1-and-H4 profile: 3 closed trades, 1 TP / 2 SL, final
   balance USD 100,525.11.
 
-This short sample is a regression check, not evidence of future profitability.
-Use the production profile by default and validate it on a later untouched
-period before any live deployment.
+This legacy comparison is a regression check, not evidence of future
+profitability. Use the v1.20 challenge profile below for the current defaults.
+
+## Challenge profile v1.20
+
+Load `configs/EKV_v120_challenge_14d_visual.set` for the intended USD 100,000
+evaluation profile. It uses Asia (01:00-04:00) and New York
+(16:30-19:30) in FTMO server time, 2% equity risk, at most two filled trades per
+day, and a fixed 1:2 reward/risk ratio. The EA blocks new entries at USD 5,000
+daily loss, USD 10,000 total loss, and after the USD 5,000 realized-profit
+target with at least two trade days. Fourteen days is a reporting target, not
+an automatic shutdown.
+
+Chart mode draws SWEEP and CHoCH labels, the FVG rectangle, Entry/SL/TP lines,
+fills and exits. The tester journal prints `PASS_14D`, `PASS_LATE`, or `FAIL`,
+plus trade days, traded/profitable weeks and observed drawdowns.
+
+Four consecutive real-tick 14-day windows were checked. Three reached the
+target within 14 days; one finished at USD 103,569.99 and did not reach it.
+The passing windows finished at USD 108,157.67, USD 109,537.93 and
+USD 105,985.98. A later regime test invalidated this candidate: separate 2024,
+2025 and 2026 runs all breached the USD 10,000 maximum-loss boundary. Do not
+use v1.20 for automated challenge trading without a redesigned entry model and
+new out-of-sample validation.
