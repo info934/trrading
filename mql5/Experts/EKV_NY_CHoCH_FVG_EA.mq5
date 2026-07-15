@@ -1,7 +1,7 @@
 #property copyright "EKV TradeGold"
-#property version   "1.20"
+#property version   "1.30"
 #property strict
-#property description "Asia/NY liquidity sweep + CHoCH + FVG challenge EA"
+#property description "NY H1-trend liquidity sweep + CHoCH + FVG EA"
 
 #include <Trade/Trade.mqh>
 
@@ -31,7 +31,7 @@ enum ENUM_BIAS_PROFILE
 input group "01 - Environment"
 input long                 InpMagicNumber          = 26071001;
 input bool                 InpRequireM5            = true;
-input bool                 InpUseAsiaSession       = true;
+input bool                 InpUseAsiaSession       = false;
 input int                  InpAsiaStartHour        = 1;        // broker server time
 input int                  InpAsiaStartMinute      = 0;
 input int                  InpAsiaEndHour          = 4;
@@ -68,14 +68,14 @@ input double               InpMinStopATR           = 0.25;
 input double               InpMaxStopATR           = 4.00;
 
 input group "04 - Higher timeframe bias"
-input ENUM_BIAS_PROFILE    InpBiasProfile          = BIAS_DISABLED;
+input ENUM_BIAS_PROFILE    InpBiasProfile          = BIAS_H1_ONLY;
 input int                  InpHTFFastEMA           = 50;
 input int                  InpHTFSlowEMA           = 200;
 input bool                 InpUseEMASlope          = true;
 
 input group "05 - Risk and exits"
 input ENUM_POSITION_SIZING InpSizingMode           = SIZING_RISK_PERCENT;
-input double               InpRiskPercent          = 2.00;
+input double               InpRiskPercent          = 1.00;
 input double               InpFixedLots            = 0.10;
 input double               InpLotMultiplier        = 1.00;
 input double               InpMaximumLots          = 10.0;
@@ -122,6 +122,8 @@ int g_trades_today = 0;
 double g_day_start_equity = 0.0;
 double g_initial_balance = 0.0;
 double g_min_equity = 0.0;
+double g_peak_equity = 0.0;
+double g_max_peak_drawdown = 0.0;
 double g_max_daily_loss_seen = 0.0;
 int g_metric_day_key = -1;
 int g_last_trade_day_key = -1;
@@ -231,6 +233,8 @@ void UpdateChallengeMetrics(const datetime now)
    const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    const double balance=AccountInfoDouble(ACCOUNT_BALANCE);
    g_min_equity=MathMin(g_min_equity,equity);
+   g_peak_equity=MathMax(g_peak_equity,equity);
+   g_max_peak_drawdown=MathMax(g_max_peak_drawdown,g_peak_equity-equity);
 
    const int current_day=DayKey(now);
    if(current_day!=g_metric_day_key)
@@ -772,6 +776,7 @@ int OnInit()
    g_challenge_start_time=TimeCurrent();
    g_day_start_equity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_min_equity=g_day_start_equity;
+   g_peak_equity=g_day_start_equity;
    UpdateChallengeMetrics(TimeCurrent());
    return INIT_SUCCEEDED;
   }
@@ -784,11 +789,12 @@ void OnDeinit(const int reason)
    const bool target_reached=g_target_reached_time>0;
    const bool target_in_time=target_reached && g_target_reached_time-g_challenge_start_time<=InpChallengeTargetDays*86400;
    const string challenge_result=!limits_ok || !target_reached ? "FAIL" : target_in_time ? "PASS_14D" : "PASS_LATE";
-   PrintFormat("CHALLENGE SUMMARY: result=%s start=%.2f final=%.2f net=%.2f trade_days=%d traded_weeks=%d profitable_weeks=%d losing_weeks=%d max_daily_loss=%.2f max_loss_from_start=%.2f target_reached=%s target_days=%d",
+   PrintFormat("CHALLENGE SUMMARY: result=%s start=%.2f final=%.2f net=%.2f trade_days=%d traded_weeks=%d profitable_weeks=%d losing_weeks=%d max_daily_loss=%.2f max_loss_from_start=%.2f max_peak_drawdown=%.2f target_reached=%s target_days=%d",
                challenge_result,
                g_initial_balance,AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_BALANCE)-g_initial_balance,
                g_trade_days,g_traded_weeks,g_profitable_weeks,g_losing_weeks,g_max_daily_loss_seen,
-               MathMax(0.0,g_initial_balance-g_min_equity),g_target_reached_time>0 ? TimeToString(g_target_reached_time,TIME_DATE|TIME_MINUTES) : "NO",InpChallengeTargetDays);
+               MathMax(0.0,g_initial_balance-g_min_equity),g_max_peak_drawdown,
+               g_target_reached_time>0 ? TimeToString(g_target_reached_time,TIME_DATE|TIME_MINUTES) : "NO",InpChallengeTargetDays);
    if(g_atr_handle!=INVALID_HANDLE)
       IndicatorRelease(g_atr_handle);
    if(g_h1_fast_handle!=INVALID_HANDLE)
@@ -859,6 +865,6 @@ void OnTick()
    g_last_bar_time=current_bar;
    ProcessClosedBar();
 
-   Comment(StringFormat("EKV Asia/NY Sweep / CHoCH / FVG v1.20\nStage: %d  Direction: %d  Trades today: %d\nPlanned lots: %.2f  Entry: %.*f\nDay start equity: %.2f",
+   Comment(StringFormat("EKV NY H1 Sweep / CHoCH / FVG v1.30\nStage: %d  Direction: %d  Trades today: %d\nPlanned lots: %.2f  Entry: %.*f\nDay start equity: %.2f",
                         (int)g_stage,g_direction,g_trades_today,g_planned_lots,_Digits,g_planned_entry,g_day_start_equity));
   }

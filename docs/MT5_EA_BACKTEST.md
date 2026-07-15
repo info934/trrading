@@ -80,3 +80,12 @@ USD 105,985.98. A later regime test invalidated this candidate: separate 2024,
 2025 and 2026 runs all breached the USD 10,000 maximum-loss boundary. Do not
 use v1.20 for automated challenge trading without a redesigned entry model and
 new out-of-sample validation.
+
+## Overall profile v1.30
+
+The redesigned default uses only the FTMO New York window, requires the H1 EMA
+trend to agree with the sweep direction, risks 1% per trade and retains the
+1:2 target. Separate 2024, 2025 and real-tick 2026 runs were all profitable.
+The combined 2024-2026 reproduction finished at USD 118,988.13 with USD
+4,930.83 peak-to-trough drawdown. See `docs/OVERALL_STRATEGY_V130.md` for the
+full comparison and limitations.

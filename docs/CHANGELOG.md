@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-15 - MT5 EA v1.30 overall profile
+
+- Replaced the regime-dependent Asia+NY unfiltered default with NY-only entries
+  aligned to the confirmed H1 EMA trend.
+- Reduced default risk from 2% to 1% while retaining the fixed 1:2 target and
+  two-trades-per-day cap.
+- Added true peak-to-trough equity drawdown tracking to tester diagnostics.
+- Screened six session/bias combinations and selected H1-only over balanced for
+  materially lower drawdown.
+- Reproduced positive results separately in 2024, 2025 and real-tick 2026 data;
+  the combined run returned USD 18,988.13 with USD 4,930.83 peak drawdown.
+
 ## 2026-07-10 - MT5 EA v1.20 challenge profile
 
 - Changed the target to 1:2 and added an Asia + New York multi-session model.
